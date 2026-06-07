@@ -73,6 +73,10 @@ data class LiveState(
     val scanning: Boolean = false,
     /** Human-readable reason for the current state (why it can't connect, what to try). */
     val statusNote: String? = null,
+    /** A WHOOP 5/MG strap was found. It connects and its battery reads, but live data needs an
+     *  MG secure handshake that isn't supported yet — so the UI explains that honestly instead of
+     *  showing the generic "charge it and put it on" checklist. */
+    val whoop5Detected: Boolean = false,
 )
 
 /**
@@ -383,7 +387,7 @@ class WhoopBleClient(
             .build()
         log("Scanning for ${model.displayName}…")
         scanning = true
-        _state.value = _state.value.copy(scanning = true, statusNote = "Searching for your ${model.displayName}…")
+        _state.value = _state.value.copy(scanning = true, whoop5Detected = false, statusNote = "Searching for your ${model.displayName}…")
         try {
             sc.startScan(filters, settings, scanCallback)
         } catch (se: SecurityException) {
@@ -538,9 +542,15 @@ class WhoopBleClient(
             val whoop5 = g.getService(WHOOP5_SERVICE)
             if (whoop4 == null && whoop5 != null) {
                 // WHOOP 5.0 / MG exposes a different service + characteristic set we don't drive yet.
-                log("WHOOP 5/MG detected — full MG support is still in progress; this build connects WHOOP 4.0.")
+                // It still connects (battery reads over the standard profile), but the secure handshake
+                // for live data is WHOOP-4-only for now — so we say that plainly rather than leaving the
+                // user staring at the generic "charge it and put it on" checklist when nothing is wrong.
+                log("WHOOP 5/MG detected — connected, but the live-data handshake is WHOOP 4.0 only for now.")
                 _state.value = _state.value.copy(
-                    statusNote = "WHOOP 5/MG detected. Full MG support is still in progress; this build connects WHOOP 4.0 straps.",
+                    whoop5Detected = true,
+                    statusNote = "WHOOP 5/MG connected — battery reads, but live heart rate needs a secure " +
+                        "handshake that's still in progress for 5/MG. Nothing's wrong with your strap. " +
+                        "WHOOP 4.0 is fully supported today.",
                 )
             }
             val custom = whoop4 ?: whoop5

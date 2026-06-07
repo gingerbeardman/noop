@@ -59,6 +59,26 @@ fun ConnectionHelp(viewModel: AppViewModel, modifier: Modifier = Modifier) {
         ActivityResultContracts.StartActivityForResult(),
     ) { /* user toggled Bluetooth; recomposition re-reads btOn */ }
 
+    // A WHOOP 5/MG strap is a different situation: it DID connect (battery reads), so the generic
+    // "is it on / is the WHOOP app holding it" checklist is misleading. Tell the user the honest
+    // truth instead — the strap and their setup are fine; the live-data handshake just isn't ready.
+    if (live.whoop5Detected) {
+        NoopCard(modifier = modifier) {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("WHOOP 5 / MG", style = NoopType.headline, color = Palette.textPrimary)
+                Text(
+                    "Your strap is connected and its battery reads. Live heart rate needs a secure " +
+                        "handshake that's still in progress for the 5/MG protocol, so it won't stream " +
+                        "yet. Nothing's wrong with your strap or your phone — WHOOP 4.0 is fully " +
+                        "supported today, and 5/MG support is being worked on.",
+                    style = NoopType.footnote,
+                    color = Palette.textSecondary,
+                )
+            }
+        }
+        return
+    }
+
     NoopCard(modifier = modifier) {
         Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
             Text("Won't connect? Run through these", style = NoopType.headline, color = Palette.textPrimary)

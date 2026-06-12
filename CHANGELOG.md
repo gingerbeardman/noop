@@ -17,6 +17,15 @@ approximate; downloads are on the [Releases](https://github.com/NoopApp/noop/rel
 
 ---
 
+## 1.98 — The archived-sleep recovery now reaches Android too
+
+- **Recovered (Android):** the reject-archive retro-decode that landed on Mac & iOS in v1.97 now runs
+  on **Android** as well. If your WHOOP 4.0 on Android synced "v25" firmware records before v1.95 — when
+  NOOP couldn't read that layout — that sleep and recovery were saved but left dark; on update NOOP
+  re-runs them through the current decoder and backfills those nights. (#151)
+
+---
+
 ## 1.97 — Sleep that was stuck in the archive comes back
 
 - **Recovered (Mac, iOS & Android):** if your WHOOP 4.0 synced "v25" firmware records *before* v1.95 —

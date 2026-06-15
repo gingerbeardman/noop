@@ -11,6 +11,7 @@ import com.noop.alarm.WindDownStore
 import com.noop.analytics.HrZones
 import com.noop.analytics.IllnessWatch
 import com.noop.analytics.IntelligenceEngine
+import com.noop.analytics.RegistryDayOwnerSource
 import com.noop.analytics.RouteMath
 import com.noop.analytics.Sport
 import com.noop.analytics.Calories
@@ -70,6 +71,54 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     val ble = noopApp.ble
 
     val repo: WhoopRepository get() = repository
+
+    // MARK: - Devices screen (multi-source Phase 1B)
+    //
+    // The Devices screen is a thin UI over the process-wide [DeviceRegistry]. Every mutation goes
+    // through a registry op here, and (for setActive) the [SourceCoordinator] is told the active device
+    // changed so it can swap the live BLE source — mirroring the macOS DevicesView, which observes the
+    // registry's @Published active id directly. The registry's reads are one-shot suspend (not a Flow),
+    // so the screen reloads the list after each op via [pairedDevices].
+
+    /** The process-wide device registry — the single source of paired devices + the active one. */
+    val deviceRegistry: com.noop.data.DeviceRegistry get() = noopApp.deviceRegistry
+
+    /** All paired devices (oldest first), read fresh. The screen re-reads after every mutation. */
+    suspend fun pairedDevices(): List<com.noop.data.PairedDeviceRow> = noopApp.deviceRegistry.all()
+
+    /** Add (or update) a paired device. */
+    suspend fun addPairedDevice(row: com.noop.data.PairedDeviceRow) = noopApp.deviceRegistry.add(row)
+
+    /** Make [id] the single active device, then tell the [SourceCoordinator] so it swaps the live source
+     *  (a no-op for a single-WHOOP install). Mirrors macOS DevicesView's `registry.setActive`. */
+    suspend fun setActiveDevice(id: String) {
+        noopApp.deviceRegistry.setActive(id)
+        noopApp.sourceCoordinator.onActiveDeviceChanged(id)
+    }
+
+    /** Archive (remove) a device — keeps its row + samples (invariant I4). */
+    suspend fun archivePairedDevice(id: String) = noopApp.deviceRegistry.archive(id)
+
+    /** Rename a device (blank clears the nickname → falls back to brand+model). */
+    suspend fun renamePairedDevice(id: String, nickname: String?) =
+        noopApp.deviceRegistry.rename(id, nickname)
+
+    /** Permanently delete all of a device's recorded data (its registry row is kept). */
+    suspend fun deletePairedDeviceData(id: String) = noopApp.deviceRegistry.deleteDeviceData(id)
+
+    /**
+     * A DISCOVERY-ONLY [StandardHrSource] for the Add-a-strap wizard. It runs its OWN scan and never
+     * connects or persists here — the [SourceCoordinator] owns connection once a strap becomes active.
+     * Both closures are no-ops; the wizard only reads its `discovered` / `scanning` StateFlows. Mirrors
+     * the macOS AddDeviceSheet's throwaway StandardHRSource(persist: { _ in }).
+     */
+    fun makeStrapScanner(): com.noop.ble.StandardHrSource =
+        com.noop.ble.StandardHrSource(
+            context = appContext,
+            deviceId = "scan-preview",
+            liveSink = { _, _ -> },
+            persist = { _, _ -> },
+        )
 
     // Body profile (age/sex/weight/height + HR-max override) — the same SharedPreferences
     // store the Settings screen edits. Feeds the on-device scorer's HRmax/zones/calories.
@@ -187,6 +236,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     init {
+        // Multi-source coordinator (Phase 1B): reconcile the live source against the registry's active
+        // device ONCE at launch. DORMANT for a single-WHOOP install (the default) — it no-ops and the
+        // existing WHOOP flow below runs unchanged; it only acts when a non-WHOOP strap is the active
+        // device. The Devices screen (next task) calls onActiveDeviceChanged after a setActive.
+        noopApp.sourceCoordinator.start()
         // Smooth HR from each LiveState emission, and re-arm the strap's firmware alarm whenever it
         // (re)bonds. A smart-alarm time changed while the strap was away never reached it — the send
         // is gated on bond — so the strap kept the OLD time and fired at it (#59). Gated on enabled so
@@ -297,6 +351,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                         importedDeviceId = deviceId,
                         maxHROverride = profileStore.hrMaxOverride
                             .takeIf { it > 0 }?.toDouble(),
+                        // I2 read-through (Phase 1B-4): resolve the single owning device per day from the
+                        // registry. A single-WHOOP install resolves to [deviceId] for every day, so the
+                        // reads stay byte-identical; multi-source installs score each day from one source.
+                        ownerSource = RegistryDayOwnerSource(noopApp.deviceRegistry),
                     )
                     // analyzeRecent now hops to Dispatchers.Default; a scope cancellation surfaces as a
                     // CancellationException that runCatching would otherwise swallow, breaking the loop's

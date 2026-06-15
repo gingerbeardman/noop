@@ -2,6 +2,7 @@ package com.noop
 
 import android.app.Application
 import android.util.Log
+import com.noop.ble.SourceCoordinator
 import com.noop.ble.WhoopBleClient
 import com.noop.data.DeviceRegistry
 import com.noop.data.WhoopDatabase
@@ -58,5 +59,28 @@ class NoopApplication : Application() {
             // client never has to read the UI/prefs layer. Default OFF — see WhoopBleClient.debugLogcat.
             debugLogcat = NoopPrefs.debugLogging(applicationContext)
         }
+    }
+
+    /**
+     * Multi-source coordinator (Phase 1B): runs exactly one device's live BLE at a time, driven by the
+     * registry's active device id. DORMANT whenever the active device is the WHOOP (the default and every
+     * single-WHOOP install), so the existing WHOOP flow is untouched. Only when a non-WHOOP generic HR
+     * strap becomes active does it pause WHOOP and run the isolated [com.noop.ble.StandardHrSource].
+     *
+     * Wired to the EXISTING [ble] entry points via closures — it never touches [WhoopBleClient]
+     * internals. Strap live HR is pushed into the same [ble] state flow the UI observes via
+     * [WhoopBleClient.publishExternalLiveHr]. [SourceCoordinator.start] reconciles once against the
+     * current active id at launch (a no-op for a single-WHOOP install); the Devices screen (next task)
+     * calls [SourceCoordinator.onActiveDeviceChanged] after a setActive.
+     */
+    val sourceCoordinator: SourceCoordinator by lazy {
+        SourceCoordinator(
+            context = applicationContext,
+            registry = deviceRegistry,
+            repository = repository,
+            liveSink = { hr, rr -> ble.publishExternalLiveHr(hr, rr) },
+            startWhoop = { ble.connect() },
+            stopWhoop = { ble.disconnect() },
+        )
     }
 }

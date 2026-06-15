@@ -38,6 +38,37 @@ interface DeviceRegistryDao {
     @Query("UPDATE pairedDevice SET status = 'archived' WHERE id = :id")
     suspend fun archiveDevice(id: String)
 
+    /** Rename a device. A null/empty nickname clears it so the UI falls back to brand+model. Mirrors the
+     *  Swift store's `UPDATE pairedDevice SET nickname = ? WHERE id = ?`. */
+    @Query("UPDATE pairedDevice SET nickname = :nickname WHERE id = :id")
+    suspend fun renameDevice(id: String, nickname: String?)
+
+    // MARK: deleteAllData — clear one device's recordings across every deviceId-keyed table.
+    //
+    // Room has no dynamic table names, so each device-scoped table gets its own DELETE here; the
+    // orchestrator [DeviceRegistry.deleteDeviceData] runs them inside one transaction (all-or-nothing).
+    // This is the Android twin of the Swift DeviceRegistryStore.deviceScopedTables list. The
+    // `pairedDevice` registry row itself is NOT here — a delete-data op empties recordings; archiving /
+    // removing the registry entry is a separate op (invariant I4).
+
+    @Query("DELETE FROM hrSample WHERE deviceId = :deviceId") suspend fun deleteHrFor(deviceId: String)
+    @Query("DELETE FROM rrInterval WHERE deviceId = :deviceId") suspend fun deleteRrFor(deviceId: String)
+    @Query("DELETE FROM spo2Sample WHERE deviceId = :deviceId") suspend fun deleteSpo2For(deviceId: String)
+    @Query("DELETE FROM skinTempSample WHERE deviceId = :deviceId") suspend fun deleteSkinTempFor(deviceId: String)
+    @Query("DELETE FROM respSample WHERE deviceId = :deviceId") suspend fun deleteRespFor(deviceId: String)
+    @Query("DELETE FROM gravitySample WHERE deviceId = :deviceId") suspend fun deleteGravityFor(deviceId: String)
+    @Query("DELETE FROM stepSample WHERE deviceId = :deviceId") suspend fun deleteStepsFor(deviceId: String)
+    @Query("DELETE FROM ppgHrSample WHERE deviceId = :deviceId") suspend fun deletePpgHrFor(deviceId: String)
+    @Query("DELETE FROM event WHERE deviceId = :deviceId") suspend fun deleteEventsFor(deviceId: String)
+    @Query("DELETE FROM battery WHERE deviceId = :deviceId") suspend fun deleteBatteryFor(deviceId: String)
+    @Query("DELETE FROM dailyMetric WHERE deviceId = :deviceId") suspend fun deleteDailyMetricsFor(deviceId: String)
+    @Query("DELETE FROM sleepSession WHERE deviceId = :deviceId") suspend fun deleteSleepSessionsFor(deviceId: String)
+    @Query("DELETE FROM journal WHERE deviceId = :deviceId") suspend fun deleteJournalFor(deviceId: String)
+    @Query("DELETE FROM workout WHERE deviceId = :deviceId") suspend fun deleteWorkoutsFor(deviceId: String)
+    @Query("DELETE FROM appleDaily WHERE deviceId = :deviceId") suspend fun deleteAppleDailyFor(deviceId: String)
+    @Query("DELETE FROM metricSeries WHERE deviceId = :deviceId") suspend fun deleteMetricSeriesFor(deviceId: String)
+    @Query("DELETE FROM dayOwnership WHERE deviceId = :deviceId") suspend fun deleteDayOwnershipFor(deviceId: String)
+
     /** Set the owner override for a day (insert-or-replace by the day PK). */
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun setDayOwner(row: DayOwnershipRow)

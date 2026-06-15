@@ -56,6 +56,45 @@ class DeviceRegistry(
     /** Archive a device — keeps its row and samples (invariant I4). */
     suspend fun archive(id: String) = dao.archiveDevice(id)
 
+    /** Rename a device. A blank [nickname] clears it so the UI falls back to brand+model. Trims
+     *  whitespace, mirroring the Swift `DeviceRegistry.rename`. */
+    suspend fun rename(id: String, nickname: String?) {
+        val trimmed = nickname?.trim()
+        dao.renameDevice(id, if (!trimmed.isNullOrEmpty()) trimmed else null)
+    }
+
+    /**
+     * Permanently delete every recorded sample/derived row for [id] across all deviceId-keyed tables, in
+     * ONE transaction (all-or-nothing) — the Android twin of the Swift
+     * `DeviceRegistryStore.deleteAllData(deviceId:)`. The `pairedDevice` registry row is left intact: a
+     * delete-data op empties recordings; archiving/removing the registry entry is a separate op (I4).
+     *
+     * The table set is the device-keyed tables of [WhoopDatabase]: hrSample, rrInterval, spo2Sample,
+     * skinTempSample, respSample, gravitySample, stepSample, ppgHrSample, event, battery, dailyMetric,
+     * sleepSession, journal, workout, appleDaily, metricSeries, dayOwnership.
+     */
+    suspend fun deleteDeviceData(id: String) {
+        transactor.run {
+            dao.deleteHrFor(id)
+            dao.deleteRrFor(id)
+            dao.deleteSpo2For(id)
+            dao.deleteSkinTempFor(id)
+            dao.deleteRespFor(id)
+            dao.deleteGravityFor(id)
+            dao.deleteStepsFor(id)
+            dao.deletePpgHrFor(id)
+            dao.deleteEventsFor(id)
+            dao.deleteBatteryFor(id)
+            dao.deleteDailyMetricsFor(id)
+            dao.deleteSleepSessionsFor(id)
+            dao.deleteJournalFor(id)
+            dao.deleteWorkoutsFor(id)
+            dao.deleteAppleDailyFor(id)
+            dao.deleteMetricSeriesFor(id)
+            dao.deleteDayOwnershipFor(id)
+        }
+    }
+
     /** Set the owner override for a day (insert-or-replace). */
     suspend fun setDayOwner(day: String, deviceId: String, locked: Boolean) =
         dao.setDayOwner(DayOwnershipRow(day = day, deviceId = deviceId, locked = locked))

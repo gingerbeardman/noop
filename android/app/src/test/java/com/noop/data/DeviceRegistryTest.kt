@@ -53,11 +53,39 @@ class DeviceRegistryTest {
             devices[id]?.let { devices[id] = it.copy(status = DeviceStatus.archived.name) }
         }
 
+        override suspend fun renameDevice(id: String, nickname: String?) {
+            devices[id]?.let { devices[id] = it.copy(nickname = nickname) }
+        }
+
         override suspend fun setDayOwner(row: DayOwnershipRow) {
             owners[row.day] = row // INSERT OR REPLACE by day PK
         }
 
         override suspend fun dayOwner(day: String): DayOwnershipRow? = owners[day]
+
+        // deleteAllData: this fake models the registry tables only (pairedDevice/dayOwnership). The
+        // sample-table deletes are validated by the real Room-backed integration; here only the
+        // dayOwnership delete touches state the fake holds. The rest are no-op stubs so the interface
+        // is satisfied without modelling every sample table on the JVM.
+        override suspend fun deleteHrFor(deviceId: String) {}
+        override suspend fun deleteRrFor(deviceId: String) {}
+        override suspend fun deleteSpo2For(deviceId: String) {}
+        override suspend fun deleteSkinTempFor(deviceId: String) {}
+        override suspend fun deleteRespFor(deviceId: String) {}
+        override suspend fun deleteGravityFor(deviceId: String) {}
+        override suspend fun deleteStepsFor(deviceId: String) {}
+        override suspend fun deletePpgHrFor(deviceId: String) {}
+        override suspend fun deleteEventsFor(deviceId: String) {}
+        override suspend fun deleteBatteryFor(deviceId: String) {}
+        override suspend fun deleteDailyMetricsFor(deviceId: String) {}
+        override suspend fun deleteSleepSessionsFor(deviceId: String) {}
+        override suspend fun deleteJournalFor(deviceId: String) {}
+        override suspend fun deleteWorkoutsFor(deviceId: String) {}
+        override suspend fun deleteAppleDailyFor(deviceId: String) {}
+        override suspend fun deleteMetricSeriesFor(deviceId: String) {}
+        override suspend fun deleteDayOwnershipFor(deviceId: String) {
+            owners.entries.removeIf { it.value.deviceId == deviceId }
+        }
     }
 
     /** Registry over the fake DAO with a pass-through transactor (Room's withTransaction stand-in). */
@@ -119,6 +147,30 @@ class DeviceRegistryTest {
         assertEquals(1, reg.all().size)
         assertEquals(DeviceStatus.archived.name, reg.all().first().status)
         assertNull(reg.activeDeviceId())
+    }
+
+    @Test
+    fun renameSetsAndClearsNickname() = runBlocking {
+        val reg = registryWith(seededDao())
+        reg.rename("my-whoop", "  Left wrist  ")
+        assertEquals("Left wrist", reg.all().first().nickname) // trimmed
+        reg.rename("my-whoop", "   ")
+        assertNull(reg.all().first().nickname) // blank clears it
+    }
+
+    @Test
+    fun deleteDeviceDataKeepsRegistryRowAndClearsOwnership() = runBlocking {
+        val reg = registryWith(seededDao())
+        reg.setDayOwner("2026-06-15", "my-whoop", locked = true)
+        assertNotNull(reg.dayOwner("2026-06-15"))
+
+        reg.deleteDeviceData("my-whoop")
+
+        // I4: the pairedDevice registry row is NOT removed by a delete-data op.
+        assertEquals(1, reg.all().size)
+        assertEquals("my-whoop", reg.all().first().id)
+        // dayOwnership rows for the device are cleared (the one table the JVM fake models).
+        assertNull(reg.dayOwner("2026-06-15"))
     }
 
     @Test

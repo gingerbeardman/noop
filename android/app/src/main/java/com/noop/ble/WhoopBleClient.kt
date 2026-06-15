@@ -554,6 +554,26 @@ class WhoopBleClient(
     private val _state = MutableStateFlow(LiveState())
     val state: StateFlow<LiveState> = _state.asStateFlow()
 
+    /**
+     * Multi-source seam (Phase 1B): publish a live HR/R-R reading that came from a NON-WHOOP source
+     * (the isolated [StandardHrSource], driven by [SourceCoordinator]) into the SAME [state] flow the
+     * UI already observes, so a generic HR strap's live HR shows in the existing Live UI.
+     *
+     * This is a tiny ADDITIVE call site, not a change to any WHOOP logic: it is invoked ONLY while the
+     * coordinator has paused WHOOP's own BLE (a non-WHOOP strap is the active device), so it can never
+     * race the WHOOP scan/connect/parse/persist path. The WHOOP-active path never calls it. HR is range
+     * gated exactly like [parseStandardHr]; R-R rides [LiveState.withRRIntervals] (rolling buffer + fresh
+     * packet), matching how the WHOOP standard-HR notification surfaces live data. Mirrors the Swift
+     * StandardHRSource writing into the shared LiveState. Persistence is owned by the source's own
+     * `persist` closure — this method touches only the live readout.
+     */
+    fun publishExternalLiveHr(hr: Int, rr: List<Int>) {
+        if (rr.isNotEmpty()) _state.value = _state.value.withRRIntervals(rr)
+        if (hr in 30..220) {
+            _state.value = _state.value.copy(heartRate = hr, connected = true)
+        }
+    }
+
     // MARK: Android Bluetooth handles.
     private val bluetoothManager: BluetoothManager? =
         context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager

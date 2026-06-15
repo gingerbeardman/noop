@@ -34,6 +34,23 @@ import kotlinx.coroutines.withContext
  */
 object IntelligenceEngine {
 
+    /**
+     * Per-day owner resolution source (invariant I2 — a day's scores come from exactly ONE device).
+     * Pure abstraction so [analyzeRecent] resolves the owning device without taking an Android Context
+     * or a Room dependency (mirrors how the engine already stays pure-JVM testable). A null source
+     * (the default) preserves the legacy single-source path BYTE-FOR-BYTE: every day reads from
+     * [importedDeviceId]. A DeviceRegistry-backed implementation lives in the app layer and is passed
+     * in by the UI scoring pass. Mirrors the Swift IntelligenceEngine.resolveDayOwner read-through (1B-4).
+     */
+    interface DayOwnerSource {
+        /** Non-archived paired devices, each as a [DayOwnerResolver.Candidate] WITHOUT its hasData flag
+         *  resolved yet (priority only: 0 = active strap, 1 = other live straps, 2 = imports). */
+        suspend fun candidatePriorities(): List<Pair<String, Int>>
+
+        /** A locked owner override for [day] from the dayOwnership table, or null. Wins outright. */
+        suspend fun lockedOwner(day: String): String?
+    }
+
     /** Minimum HR samples in a day's window before it is worth scoring. */
     const val MIN_HR_SAMPLES: Int = 200
 
@@ -84,8 +101,9 @@ object IntelligenceEngine {
         importedDeviceId: String = "my-whoop",
         maxHROverride: Double? = null,
         nowSeconds: Long = System.currentTimeMillis() / 1000L,
+        ownerSource: DayOwnerSource? = null,
     ): List<Computed> = withContext(Dispatchers.Default) {
-        analyzeRecentOnCpu(repo, profile, maxDays, importedDeviceId, maxHROverride, nowSeconds)
+        analyzeRecentOnCpu(repo, profile, maxDays, importedDeviceId, maxHROverride, nowSeconds, ownerSource)
     }
 
     /** History span for the one-shot Effort rescore — large enough to cover any real wear history,
@@ -137,6 +155,7 @@ object IntelligenceEngine {
         importedDeviceId: String = "my-whoop",
         maxHROverride: Double? = null,
         nowSeconds: Long = System.currentTimeMillis() / 1000L,
+        ownerSource: DayOwnerSource? = null,
     ): List<Computed> {
         val hrvCfg = Baselines.metricCfg["hrv"] ?: return emptyList()
         val rhrCfg = Baselines.metricCfg["resting_hr"] ?: return emptyList()
@@ -152,6 +171,15 @@ object IntelligenceEngine {
         // for an hour-of-day band). Computed once per run.
         val tzOffsetSeconds =
             java.util.TimeZone.getDefault().getOffset(nowSeconds * 1_000L) / 1_000L
+
+        // Device-registry snapshot for per-day owner resolution (invariant I2 — a day's scores come from
+        // exactly ONE source). Read ONCE before the loop: the paired-device list is stable for the run.
+        // With only the seeded 'my-whoop' row paired (the default and every single-WHOOP install) the
+        // active strap == [importedDeviceId], so [resolveDayOwner] returns [importedDeviceId] for every
+        // day and the per-day reads are BYTE-IDENTICAL to the pre-I2 path. A null [ownerSource] (the
+        // default, e.g. the backfill-triggered pass) skips resolution entirely. Mirrors the Swift
+        // IntelligenceEngine.analyzeRecent registry snapshot + resolveDayOwner. (1B-4)
+        val candidatePriorities = ownerSource?.candidatePriorities().orEmpty()
 
         // ── Pass 1: detect + aggregate each offloaded night, scoring against the
         // imported-only baseline. For a BLE-only user repo.days(importedDeviceId) is
@@ -195,13 +223,20 @@ object IntelligenceEngine {
             val from = dayStart - 30 * 3_600L
             val to = dayStart + 12 * 3_600L
 
-            val hr = repo.hrSamples(importedDeviceId, from, to, STREAM_LIMIT)
+            // I2: pick the single device that OWNS this day, and read ITS streams below. With one device
+            // this resolves to [importedDeviceId] (active strap, has data → priority 0), so nothing
+            // changes; with multiple sources the day is scored from exactly one (active strap > other
+            // live straps > imports, or a locked override). Falls back to [importedDeviceId] when no
+            // owner source is supplied or the registry yields no owner.
+            val owner = resolveDayOwner(repo, ownerSource, candidatePriorities, day, from, to, importedDeviceId)
+
+            val hr = repo.hrSamples(owner, from, to, STREAM_LIMIT)
             if (hr.size < MIN_HR_SAMPLES) continue // need real raw data, not a stray sample
-            val rr = repo.rrIntervals(importedDeviceId, from, to, STREAM_LIMIT)
-            val resp = repo.respSamples(importedDeviceId, from, to, STREAM_LIMIT)
-            val grav = repo.gravitySamples(importedDeviceId, from, to, STREAM_LIMIT)
-            val steps = repo.stepSamples(importedDeviceId, from, to, STREAM_LIMIT)
-            val skin = repo.skinTempSamples(importedDeviceId, from, to, STREAM_LIMIT)
+            val rr = repo.rrIntervals(owner, from, to, STREAM_LIMIT)
+            val resp = repo.respSamples(owner, from, to, STREAM_LIMIT)
+            val grav = repo.gravitySamples(owner, from, to, STREAM_LIMIT)
+            val steps = repo.stepSamples(owner, from, to, STREAM_LIMIT)
+            val skin = repo.skinTempSamples(owner, from, to, STREAM_LIMIT)
 
             // Calendar-day window for the ADDITIVE daily totals (steps + calories). The night window
             // above is anchored to the current time-of-day and ends at dayStart+12h, so for a PAST
@@ -213,8 +248,10 @@ object IntelligenceEngine {
             // is inclusive, so end at +86400-1s; analyzeDay also filters to the day). (#277)
             val dayMidnight = midnightLocal(dayStart, tzOffsetSeconds)
             val dayEnd = dayMidnight + SECONDS_PER_DAY - 1
-            val dayHr = repo.hrSamples(importedDeviceId, dayMidnight, dayEnd, STREAM_LIMIT)
-            val daySteps = repo.stepSamples(importedDeviceId, dayMidnight, dayEnd, STREAM_LIMIT)
+            // Same [owner] as the night window above (I2): the additive day totals must come from the one
+            // device that owns the day, never a mix.
+            val dayHr = repo.hrSamples(owner, dayMidnight, dayEnd, STREAM_LIMIT)
+            val daySteps = repo.stepSamples(owner, dayMidnight, dayEnd, STREAM_LIMIT)
 
             val res = AnalyticsEngine.analyzeDay(
                 day = day,
@@ -533,6 +570,42 @@ object IntelligenceEngine {
         val scaled = Baselines.deviation(v, b).delta * 100.0
         val r = if (scaled >= 0) Math.floor(scaled + 0.5) else Math.ceil(scaled - 0.5)
         return r / 100.0
+    }
+
+    /**
+     * Resolve the SINGLE device that owns [day] (invariant I2), so the day is scored from exactly one
+     * source — never a mix. A locked override (dayOwnership) wins outright and skips the presence checks.
+     * Otherwise builds one [DayOwnerResolver.Candidate] per device from [candidatePriorities] with a CHEAP
+     * per-day presence flag (one `LIMIT 1` HR read per device over the night window), and returns the
+     * lowest-priority candidate that has data. Returns [importedDeviceId] when [ownerSource] is null or
+     * the resolver yields no owner — so the legacy single-source path is preserved.
+     *
+     * Single-device install: the only paired row is the seeded active 'my-whoop' (== [importedDeviceId]).
+     * Its candidate is priority 0 with hasData==true for any day the strap collected HR, so the resolver
+     * returns [importedDeviceId] and the caller's reads are byte-identical to the pre-I2 code. The presence
+     * check is the same `LIMIT 1` over the same window the caller already reads. Mirrors the Swift
+     * IntelligenceEngine.resolveDayOwner.
+     */
+    private suspend fun resolveDayOwner(
+        repo: WhoopRepository,
+        ownerSource: DayOwnerSource?,
+        candidatePriorities: List<Pair<String, Int>>,
+        day: String,
+        from: Long,
+        to: Long,
+        importedDeviceId: String,
+    ): String {
+        if (ownerSource == null) return importedDeviceId
+        // A locked override wins outright and skips the presence checks entirely.
+        ownerSource.lockedOwner(day)?.let { return it }
+        if (candidatePriorities.isEmpty()) return importedDeviceId
+        val candidates = candidatePriorities.map { (id, priority) ->
+            // Cheap presence check: a single HR row for this device in the night window marks it a
+            // candidate. (LIMIT 1 — not the full pull the caller does once an owner is chosen.)
+            val hasData = repo.hrSamples(id, from, to, 1).isNotEmpty()
+            DayOwnerResolver.Candidate(deviceId = id, priority = priority, hasData = hasData)
+        }
+        return DayOwnerResolver.resolve(day, lockedOwner = null, candidates = candidates) ?: importedDeviceId
     }
 
     /**

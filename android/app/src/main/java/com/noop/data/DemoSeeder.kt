@@ -44,6 +44,40 @@ object DemoSeeder {
         seed(repo)
     }
 
+    /**
+     * Demo-only: seed a SECOND paired device (a Polar H10) into the registry so the Devices screen shows
+     * the WHOOP (Active) alongside a paired generic strap out of the box — no real hardware needed. The
+     * WHOOP `pairedDevice` row itself is created by the v7→v8 migration; this only adds the demo strap, and
+     * only if the registry currently holds exactly the WHOOP (so it runs at most once and never clobbers a
+     * real pairing). Gated by the caller to `BuildConfig.ENABLE_DEMO`. Status `paired` (not active), so the
+     * SourceCoordinator stays dormant on the WHOOP and the existing live flow is untouched.
+     */
+    suspend fun seedDemoDeviceIfNeeded(registry: DeviceRegistry) {
+        val devices = registry.all()
+        // Only seed when the registry is the freshly-migrated single-WHOOP state.
+        if (devices.size != 1) return
+        if (!SourceCoordinatorIsWhoop(devices.first())) return
+        val now = System.currentTimeMillis() / 1000
+        registry.add(
+            PairedDeviceRow(
+                id = "demo-polar-h10",
+                brand = "Polar",
+                model = "H10",
+                nickname = null,
+                sourceKind = SourceKind.liveBLE.name,
+                capabilities = "hr,hrv",
+                status = DeviceStatus.paired.name,
+                addedAt = now,
+                // A plausible "Last seen 3h ago" so the card's last-seen line reads naturally in the demo.
+                lastSeenAt = now - 3 * 3600,
+            ),
+        )
+    }
+
+    /** Local WHOOP check, kept here so DemoSeeder (data layer) needn't import the BLE-layer coordinator. */
+    private fun SourceCoordinatorIsWhoop(d: PairedDeviceRow): Boolean =
+        d.id == "my-whoop" || d.brand.equals("WHOOP", ignoreCase = true)
+
     private suspend fun seed(repo: WhoopRepository) {
         val rng = Random(0xC0FFEE)
         val zone = ZoneId.systemDefault()

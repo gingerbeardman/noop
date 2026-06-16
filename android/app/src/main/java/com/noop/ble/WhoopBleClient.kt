@@ -783,11 +783,8 @@ class WhoopBleClient(
      *  buffer + "Share strap log" exist (issues #17/#18). */
     private val logBuffer = ArrayDeque<String>()
     private val logTimeFmt = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US)
-    // PII scrubbers for the shareable strap log (#445). MAC: keep first+last byte, mask the unique middle.
-    // WHOOP serial: the device name carries it ("WHOOP 4C1594026"); the dotted model names ("WHOOP 4.0")
-    // are too short / dotted to match.
-    private val MAC_RE = Regex("([0-9A-Fa-f]{2}):[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:([0-9A-Fa-f]{2})")
-    private val WHOOP_SERIAL_RE = Regex("WHOOP (\\d[0-9A-Za-z]{5,})")
+    // PII scrubbers for the shareable strap log (#445) live at file scope as [redactStrapLogPii]
+    // so they're unit-testable without constructing this Android-only client (#421).
 
     /** Fired if a scan finds nothing in [SCAN_TIMEOUT_MS]; stops scanning and explains why. */
     private val scanTimeoutRunnable = Runnable {
@@ -3587,9 +3584,7 @@ class WhoopBleClient(
      *  log sink so EVERY line is covered, including the generic-HR diagnostics. MACs require colons, so hex
      *  command payloads (no colons) are untouched; the model names "WHOOP 4.0"/"5.0" (dotted, short) don't
      *  match the serial pattern. */
-    private fun redactPii(s: String): String = s
-        .replace(MAC_RE, "$1:••:••:••:••:$3")
-        .replace(WHOOP_SERIAL_RE, "WHOOP <serial>")
+    private fun redactPii(s: String): String = redactStrapLogPii(s)
 
     /**
      * Write a line into the SAME in-app strap-log ring buffer the user exports via [exportLogText],
@@ -3602,3 +3597,23 @@ class WhoopBleClient(
     /** Snapshot of the recent strap log, newest last, for the "Share strap log" diagnostics export. */
     fun exportLogText(): String = synchronized(logBuffer) { logBuffer.joinToString("\n") }
 }
+
+// PII scrubbers for the shareable strap log (#445). Kept at FILE scope (not inside WhoopBleClient) so
+// they're unit-testable without constructing the Android-only BLE client.
+//
+//   • MAC: keep the first + LAST octet, mask the four unique middle octets. The regex captures exactly
+//     TWO groups — group 1 (first octet) and group 2 (last octet) — so the replacement must reference
+//     $1 and $2. (#421: this previously referenced `$3`, which doesn't exist, so the moment any RAW MAC
+//     was logged — e.g. a generic-HR strap's `device.address` in StandardHrSource.connectToDevice — the
+//     replace() threw IndexOutOfBoundsException("No group 3"), and the thrown exception aborted that
+//     strap's activation. The WHOOP path never hit it because it only ever logs "WHOOP <serial>", never
+//     a raw MAC, so the bug was invisible until a Polar H10 / other 0x180D strap was used.)
+//   • WHOOP serial: the device name carries it ("WHOOP 4C1594026"); the dotted model names ("WHOOP 4.0")
+//     are too short / dotted to match.
+private val PII_MAC_RE = Regex("([0-9A-Fa-f]{2}):[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:([0-9A-Fa-f]{2})")
+private val PII_WHOOP_SERIAL_RE = Regex("WHOOP (\\d[0-9A-Za-z]{5,})")
+
+/** Mask MAC addresses and WHOOP serials in a strap-log line before it's shown/exported. Pure + total. */
+internal fun redactStrapLogPii(s: String): String = s
+    .replace(PII_MAC_RE, "$1:••:••:••:••:$2")
+    .replace(PII_WHOOP_SERIAL_RE, "WHOOP <serial>")

@@ -25,7 +25,7 @@ object AppChangelog {
      * Bump this when you add a release below. The "What's New" sheet shows automatically when the
      * stored last-seen version is behind this. (Decoupled from the bundle version on purpose.)
      */
-    const val CURRENT_VERSION = "4.2.10"
+    const val CURRENT_VERSION = "4.2.11"
 
     data class Release(
         val version: String,
@@ -36,6 +36,14 @@ object AppChangelog {
 
     /** Newest first. */
     val releases: List<Release> = listOf(
+        Release(
+            version = "4.2.11",
+            title = "Fix: connecting a Polar H10 or other heart-rate strap",
+            date = "June 2026",
+            items = listOf(
+                "**Fixed a crash that stopped Polar H10 and other standard Bluetooth heart-rate straps from connecting.** When NOOP tried to activate a generic HR strap, an internal logging bug threw an error the instant it wrote the strap's Bluetooth address into the log — and that error quietly aborted the connection, so the strap paired but never streamed live data. Generic HR straps now connect and stream as intended. (WHOOP straps were never affected — they don't log a raw address.) Thanks @pilleuspulcher-blip for the strap log that pinned it down (#421).",
+            ),
+        ),
         Release(
             version = "4.2.10",
             title = "Week in Review is honest about a half-finished week",

@@ -17,6 +17,10 @@ approximate; downloads are on the [Releases](https://github.com/NoopApp/noop/rel
 
 ---
 
+## 4.2.11 — Polar H10 & other heart-rate straps connect again (Android fix)
+
+- **Fixed a crash that stopped Polar H10 and other standard Bluetooth heart-rate straps from connecting on Android.** When NOOP went to activate a generic HR strap, an internal log-redaction bug threw an error the instant it wrote the strap's Bluetooth address into the strap log — and that thrown error quietly aborted the connection, so the strap paired but never streamed live data. The strap now connects and streams as intended. **WHOOP straps were never affected** (they only ever log a `<serial>`, never a raw address, so the bug stayed hidden until a generic strap was used). Added a unit test so it can't regress. Thanks **@pilleuspulcher-blip** for the strap log that pinned it (#421). *(Android only — macOS/iOS were never affected; they stay on 4.2.10.)*
+
 ## 4.2.10 — Week in Review is honest about a half-finished week (all platforms)
 
 - The **Week in Review** summary no longer says "a steady week — nothing moved" when you're only **a day or two into the week**. Early on, NOOP genuinely can't call a week-over-week trend — but the summary used to claim a steady week while the change chips right above it showed big percentage swings off those same one or two days, which read as a contradiction. Now a sparse current week says something like *"Only 2 days into this week so far — too early to call a week-over-week trend yet,"* matching what the chips can and can't tell you. A full week with genuinely flat metrics still reads as steady. Thanks **@pikapik487** (#463).

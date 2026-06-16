@@ -428,7 +428,7 @@ garbage (HR `0`, gravity overflow). The fields below were read off real frames a
 | 23 | `rr_count` (u8) | matches #valid R-R intervals 100 % (1141/1143) |
 | 24 + 2·i | `rr[i]` (u16, ms) | 60000/mean(R-R) ≈ HR for 88 % (rest are HR-averaging) |
 | 45 / 49 / 53 | `gravity_x/y/z` (f32, g) | \|g\| ≈ 1.0 for 100 % of 500 records; v18 has **one** triplet (not v24's two) |
-| 73 | `skin_temp_raw` (u16); °C = raw / 128 | **AS6221** digital skin sensor (named in the firmware console logs); `/128` = its native 7.8125 m°C/LSB. Verified by the on-wrist **warming curve 17.5 → 28 °C** as the sensor equilibrates after donning — a thermal signature nothing else has. Stored **raw** (scale-agnostic; the absolute `/128` vs `/100` reading awaits a contact-thermometer). Decoded in `decodeWhoop5Historical` (`Interpreter.swift`); flows to the decode-features store as `skin_temp_raw` + derived `skin_temp_c`. |
+| 73 | `skin_temp_raw` (u16); °C = raw / 128 | A **digital skin-temperature sensor**; the `/128` scale (≈7.8125 m°C/LSB) matches its observed resolution. Identified **purely from the data**: the on-wrist **warming curve 17.5 → 28 °C** as it equilibrates after donning is a thermal signature nothing else in the record has. Stored **raw** (scale-agnostic; the absolute `/128` vs `/100` reading awaits a contact-thermometer). Decoded in `decodeWhoop5Historical` (`Interpreter.swift`); flows to the decode-features store as `skin_temp_raw` + derived `skin_temp_c`. |
 
 The strongest check on the HR offset: where a historical record and a live `REALTIME_DATA` (§5, 2A37
 ground-truth-verified) frame share a timestamp, the historical HR equalled the live HR at **96/96**

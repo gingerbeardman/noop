@@ -136,6 +136,11 @@ struct WorkoutsView: View {
             ManualWorkoutSheet(editing: target.editing) { row, replacing in
                 Task {
                     await repo.saveManualWorkout(row, replacing: replacing)
+                    // #598: rescore the just-added workout from the strap's HR for its window NOW, so its
+                    // average / peak HR, strain and calories appear immediately (from your own strap data)
+                    // instead of waiting up to 15 minutes for the next analyze tick. No-ops when the strap
+                    // had no HR for that window, and never overrides a value you typed yourself.
+                    await model.intelligence.analyzeRecent()
                     await reload()
                     // Post-log note (#439): if this sport now has a solid/building recovery-cost
                     // entry, surface its personal-pattern sentence as a transient caption.

@@ -931,7 +931,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
      *  Sleep screen already applied the change optimistically. */
     suspend fun updateSleepSessionTimes(session: com.noop.data.SleepSession, newStartTs: Long, newEndTs: Long) {
         runCatching { repository.updateSleepSessionTimes(session, newStartTs, newEndTs) }
-        rescoreAfterSleepEdit()
+        rescoreAfterEdit()
     }
 
     /** Delete one sleep session, then re-score the affected day immediately so the dashboard aggregates
@@ -940,7 +940,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
      *  optimistically, so the day recomputes without the misread night either way. (#281) */
     suspend fun deleteSleepSession(session: com.noop.data.SleepSession) {
         runCatching { repository.deleteSleepSession(session) }
-        rescoreAfterSleepEdit()
+        rescoreAfterEdit()
     }
 
     /** Manually add a missed nap as its OWN session (#508) — staged from raw, written under the computed
@@ -950,7 +950,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
      *  recomputes from the persisted rows on its next reload. */
     suspend fun addManualNap(startTs: Long, endTs: Long) {
         runCatching { repository.addManualNap(deviceId, startTs, endTs) }
-        rescoreAfterSleepEdit()
+        rescoreAfterEdit()
     }
 
     // --- On-device short-nap detection (PR #569 reimpl under NoopApp). Candidates are detected on the
@@ -981,7 +981,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         com.noop.data.NapStore.dismiss(appContext, com.noop.data.NapStore.idFor(candidate))
 
     /**
-     * Re-score recent days right after a sleep edit (edit / delete / add-nap), so daily recovery + the
+     * Re-score recent days right after an edit that changes them (a sleep edit / delete / add-nap, or a
+     * manually-added workout — #598), so daily recovery + the
      * persisted sleep_performance recompute and [recentDays] (daysMergedFlow) republishes to Today the
      * same instant the Sleep tab updates — closing the up-to-15-min staleness where Charge / Rest on Today
      * disagreed with the Sleep tab after an edit (audit #2/#3/#4). The args are kept byte-identical to the
@@ -990,7 +991,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
      * a failure here just leaves the loop to catch up; never throws into the edit caller. CancellationException
      * is rethrown so a ViewModel teardown mid-edit isn't swallowed (matches the loop's #125 handling).
      */
-    private suspend fun rescoreAfterSleepEdit() {
+    private suspend fun rescoreAfterEdit() {
         runCatching {
             IntelligenceEngine.analyzeRecent(
                 repo = repository,
@@ -1110,6 +1111,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun saveManualWorkout(row: WorkoutRow, replacing: WorkoutRow? = null) {
         viewModelScope.launch {
             runCatching { repository.saveManualWorkout(row, replacing) }
+            // #598: rescore the just-added workout from the strap's HR for its window NOW, so its average /
+            // peak HR, strain and calories appear immediately instead of waiting for the next analyze tick.
+            // No-ops when there's no strap HR for the window; never overrides a value the user typed.
+            rescoreAfterEdit()
             loadWorkouts()
         }
     }

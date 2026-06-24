@@ -367,6 +367,12 @@ fun SettingsScreen(vm: AppViewModel) {
     var rhythmEnabled by remember { mutableStateOf(RhythmConsent.isEnabled(context)) }
     var coachSignals by remember { mutableStateOf(NoopPrefs.coachSignals(context)) }
     var autoDetectWorkouts by remember { mutableStateOf(NoopPrefs.autoDetectWorkouts(context)) }
+    // Keep the screen on during a manual workout recording (#703), default OFF. The live-workout
+    // screen reads this same "workoutKeepScreenOn" key. String shared verbatim with the iOS/Mac twin
+    // (AppStorage "workoutKeepScreenOn"). Read/written inline against the shared prefs store.
+    var workoutKeepScreenOn by remember {
+        mutableStateOf(NoopPrefs.of(context).getBoolean("workoutKeepScreenOn", false))
+    }
 
     // Scheduled debug export (#510) — the daily auto-export toggle + time-of-day. The settings object is
     // its own SharedPreferences store; SharedPreferences isn't reactive, so the Switch + TimeChip mirror
@@ -1593,6 +1599,16 @@ fun SettingsScreen(vm: AppViewModel) {
                 )
                 RowDivider()
                 ToggleRow(
+                    title = "Keep screen on during a workout",
+                    detail = "Holds the screen awake while you're recording a workout, so your live heart rate stays visible without the phone dimming. Only applies during a recording — the screen sleeps normally the rest of the time. Leaving it on does use a bit more battery, and means your unlocked screen stays visible for the whole workout, so flip it off if that's a concern.",
+                    checked = workoutKeepScreenOn,
+                    onCheckedChange = {
+                        workoutKeepScreenOn = it
+                        NoopPrefs.of(context).edit().putBoolean("workoutKeepScreenOn", it).apply()
+                    },
+                )
+                RowDivider()
+                ToggleRow(
                     title = "Stress check-ins (haptic)",
                     detail = "Lets NOOP notice a fresh HRV dip while you're still and offer a minute to breathe. \"Stress\" here is an autonomic proxy from your own baseline — never a diagnosis. The strap gives one light confirming buzz; no push notification.",
                     checked = stressCheckIn,
@@ -1830,6 +1846,35 @@ fun SettingsScreen(vm: AppViewModel) {
                         Text("Project home & source", style = NoopType.body, color = Palette.textPrimary)
                         Text(
                             "GitHub — code, releases, issues and the wiki.",
+                            style = NoopType.caption,
+                            color = Palette.textTertiary,
+                        )
+                    }
+                }
+
+                // Mirror — noop.fans carries every release alongside GitHub, so users have a
+                // fallback if GitHub is ever unreachable (#606). Same downloads, release for release.
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(Palette.accent.copy(alpha = 0.10f))
+                        .border(1.dp, Palette.accent.copy(alpha = 0.25f), RoundedCornerShape(10.dp))
+                        .clickable {
+                            val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://noop.fans"))
+                            try {
+                                context.startActivity(intent)
+                            } catch (_: ActivityNotFoundException) {
+                                Toast.makeText(context, "noop.fans", Toast.LENGTH_LONG).show()
+                            }
+                        }
+                        .padding(horizontal = 14.dp, vertical = 12.dp)
+                        .semantics { contentDescription = "Mirror at noop.fans, a fallback if GitHub is down" },
+                ) {
+                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text("Mirror — noop.fans", style = NoopType.body, color = Palette.textPrimary)
+                        Text(
+                            "Every release, mirrored. A fallback if GitHub is ever down.",
                             style = NoopType.caption,
                             color = Palette.textTertiary,
                         )

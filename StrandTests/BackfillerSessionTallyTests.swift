@@ -31,12 +31,20 @@ final class BackfillerSessionTallyTests: XCTestCase {
     // The summary stays SILENT when nothing persisted, so a console-only / caught-up session doesn't
     // claim a false success — the existing empty-banking diagnostics speak for that case instead.
     func testSessionSummaryNilWhenNoRows() {
-        XCTAssertNil(Backfiller.sessionSummaryLine(rows: 0, motion: 0, nights: 0))
+        XCTAssertNil(Backfiller.sessionSummaryLine(rows: 0, motion: 0, skinTemp: 0, nights: 0))
     }
 
     func testSessionSummaryFormat() {
         XCTAssertEqual(
-            Backfiller.sessionSummaryLine(rows: 240, motion: 180, nights: 3),
-            "Backfill: session persisted 240 rows (180 with motion) across 3 night(s).")
+            Backfiller.sessionSummaryLine(rows: 240, motion: 180, skinTemp: 12, nights: 3),
+            "Backfill: session persisted 240 rows (180 with motion, 12 skin-temp) across 3 night(s).")
+    }
+
+    // #727: a strap banking HR/RR-only records (no DSP sleep block) persists rows but ZERO skin-temp,
+    // so the line surfaces that 0 and "skin temp never appears" reports are self-diagnosing from the log.
+    func testSessionSummaryShowsZeroSkinTemp() {
+        XCTAssertEqual(
+            Backfiller.sessionSummaryLine(rows: 872, motion: 172, skinTemp: 0, nights: 1),
+            "Backfill: session persisted 872 rows (172 with motion, 0 skin-temp) across 1 night(s).")
     }
 }

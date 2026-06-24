@@ -99,7 +99,12 @@ enum CsvExport {
                 ("physiological_cycles.csv",
                  Data(WhoopCsvExporter.cyclesCSV(days: days, series: series, sourceByDay: sourceByDay).utf8)),
                 ("sleeps.csv",
-                 Data(WhoopCsvExporter.sleepsCSV(sleeps, sourceBySession: { sleepSource[$0.startTs] ?? "" }).utf8)),
+                 Data(WhoopCsvExporter.sleepsCSV(
+                    sleeps,
+                    // "Cycle start time" = the session's local end-day (the same key cyclesCSV/mergeSleep
+                    // use), so the two CSVs reconcile by cycle for a non-UTC user (#715).
+                    cycleStart: { endDay($0) + " 00:00:00" },
+                    sourceBySession: { sleepSource[$0.startTs] ?? "" }).utf8)),
                 ("workouts.csv",
                  Data(WhoopCsvExporter.workoutsCSV(workouts, sourceLabel: { workoutSource($0, computedId: computedId) }).utf8)),
                 ("journal_entries.csv", Data(WhoopCsvExporter.journalCSV(journal).utf8)),

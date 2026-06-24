@@ -260,6 +260,11 @@ fun AppRoot(viewModel: AppViewModel = viewModel()) {
                         // The opt-in Hydration card (only shown when Hydration tracking is on) pushes its
                         // detail. A normal push so the back-stack returns to Today.
                         onOpenHydration = { nav.navigate(Destination.Hydration.route) },
+                        // #706/#684: the dashboard cards draw a tappable chevron; wire each to its detail,
+                        // matching iOS. Stress + the vitals are pushes; Sleep is a top-level tab switch.
+                        onOpenStress = { nav.navigate(Destination.Stress.route) },
+                        onOpenHealth = { nav.navigate(Destination.Health.route) },
+                        onOpenSleep = { nav.navigateTopLevel(Destination.Sleep.route) },
                     )
                 }
                 composable(Destination.Live.route) {

@@ -87,6 +87,10 @@ final class Backfiller {
     /// "persisted N rows (M with motion) across K night(s)". Nights are day-keys (ts / 86400).
     private(set) var sessionRowsPersisted = 0
     private(set) var sessionMotionRows = 0
+    /// #727: skin-temp samples banked this session. WHOOP 4.0 carries skin temp (and the raw SpO2 channel)
+    /// ONLY in its full DSP sleep records; a strap banking HR/RR-only records reports 0 here even on a
+    /// healthy-looking sync, so surfacing it makes "skin temp never appears" reports self-diagnosing.
+    private(set) var sessionSkinTempRows = 0
     private var sessionNightKeys: Set<Int> = []
     var sessionNights: Int { sessionNightKeys.count }
     /// Logged once per session when the strap reports trim=0xFFFFFFFF — the "no valid flash cursor"
@@ -151,6 +155,7 @@ final class Backfiller {
         chunkOpen = true
         sessionRowsPersisted = 0
         sessionMotionRows = 0
+        sessionSkinTempRows = 0
         sessionNightKeys.removeAll(keepingCapacity: true)
         loggedNoCursor = false
         sessionDroppedImplausible = 0
@@ -209,9 +214,9 @@ final class Backfiller {
     /// The one-line session success summary (#150) — the success-side log that never existed. Returns nil
     /// when nothing persisted (so a console-only / caught-up session stays quiet and the existing
     /// empty-banking diagnostics speak instead).
-    nonisolated static func sessionSummaryLine(rows: Int, motion: Int, nights: Int) -> String? {
+    nonisolated static func sessionSummaryLine(rows: Int, motion: Int, skinTemp: Int, nights: Int) -> String? {
         guard rows > 0 else { return nil }
-        return "Backfill: session persisted \(rows) rows (\(motion) with motion) across \(nights) night(s)."
+        return "Backfill: session persisted \(rows) rows (\(motion) with motion, \(skinTemp) skin-temp) across \(nights) night(s)."
     }
 
     /// Commit one HISTORY_END chunk: (persist decoded → enqueueRaw when present) → setCursor → ackTrim.
@@ -331,6 +336,7 @@ final class Backfiller {
             let tally = Backfiller.chunkTally(counts: counts, timestamps: decoded.gravity.map(\.ts) + decoded.hr.map(\.ts))
             sessionRowsPersisted += tally.rows
             sessionMotionRows += tally.motion
+            sessionSkinTempRows += counts.skinTemp
             sessionNightKeys.formUnion(tally.nights)
 
             // #77 / #91: any genuinely-undecodable type-47 record in this chunk must be ARCHIVED

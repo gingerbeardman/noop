@@ -2290,27 +2290,44 @@ internal fun selectNight(
     val groupStarts = group.map { it.startTs }.toHashSet()
     val napBlocks = blocks.filter { it.startTs !in groupStarts }
         .sortedBy { it.effectiveStartTs }
+    // Drop a spurious leading pre-sleep awake stub from the hero's RECONSTRUCTION so the hypnogram and the
+    // summed minutes start where the displayed bedtime (the main block's onset) does (#736). A night can
+    // record a brief, all-awake pre-onset block (e.g. lying in bed before sleep); the gap-bridge folds it
+    // into the group, so the chart drew sleep beginning before the labelled "Asleep" time. We only drop a
+    // BRIEF, essentially-sleepless leading fragment that also sits before the main block, so a genuine first
+    // sleep fragment of an interrupted/biphasic night is never lost. The stub still rides in `groupStarts`
+    // above, so it is never mislabelled as a nap. `session` (the edit anchor) is already the main block, so
+    // the bedtime label and the pencil were aligned — this aligns the chart to that same bedtime. (#736/#555)
+    val onsetTsForHero = session.effectiveStartTs
+    val heroGroup = group.dropWhile { it.effectiveStartTs < onsetTsForHero && isPreOnsetAwakeStub(it) }
     val utcKey = AnalyticsEngine.dayString(session.endTs)
     val localKey = localDayString(session.endTs)
     val dayKey = listOf(utcKey, localKey).firstOrNull { key ->
         days.any { it.day == key && (it.deepMin ?: 0.0) + (it.remMin ?: 0.0) + (it.lightMin ?: 0.0) > 0.0 }
     } ?: utcKey
     // Lay every fragment's persisted segments end-to-end so a biphasic night draws as one continuous
-    // hypnogram, and SUM their stage minutes for the hero. Null for a single-block day → prior behaviour.
-    val groupSegments = if (group.size > 1) {
-        group.flatMap { parsePersistedSegments(it.stagesJSON).orEmpty() }
+    // hypnogram, and SUM their stage minutes for the hero. Built from `heroGroup` (the group minus a leading
+    // spurious stub, #736) so the chart and minutes start at the displayed bedtime. Null for a single-block
+    // hero → prior behaviour.
+    val groupSegments = if (heroGroup.size > 1) {
+        heroGroup.flatMap { parsePersistedSegments(it.stagesJSON).orEmpty() }
             .sortedBy { it.start }
             .takeIf { it.size >= 2 }
     } else null
-    val groupStages = if (group.size > 1) sumGroupStages(group) else null
+    val groupStages = if (heroGroup.size > 1) sumGroupStages(heroGroup) else null
     val segments = (groupSegments ?: parsePersistedSegments(session.stagesJSON))
         ?.map { seg -> seg.stage to ((seg.end - seg.start) / 60f) }
-    // #407: lay the GROUP's per-epoch motion fragment-by-fragment in `group` order (the same order
+    // #407: lay the GROUP's per-epoch motion fragment-by-fragment in `heroGroup` order (the same order
     // `groupSegments` lays the stage timeline), reading the already-chosen group's stored series. The
     // detected key (`startTs`) is the motion store's key. A fragment with no series contributes nothing; if
     // NO fragment has one, `groupMotion` is empty → honest empty state.
-    val groupMotion = group.flatMap { motionByStart[it.startTs].orEmpty() }
-    return HeroNight(session, dayKey, segments, sessionClockLabel(session), napBlocks, groupStages,
+    val groupMotion = heroGroup.flatMap { motionByStart[it.startTs].orEmpty() }
+    // #736 parity: the displayed bedtime must match where the hypnogram starts. The chart is built from
+    // heroGroup (first non-stub fragment onward), so label from THAT fragment's onset (mirrors Swift
+    // nightOnsetTs / synth.startTs), closed by the group's latest wake. `session` stays the edit anchor only.
+    val heroOnsetTs = heroGroup.firstOrNull()?.effectiveStartTs ?: session.effectiveStartTs
+    val heroWakeTs = heroGroup.maxOfOrNull { it.endTs } ?: session.endTs
+    return HeroNight(session, dayKey, segments, clockLabelFor(heroOnsetTs, heroWakeTs), napBlocks, groupStages,
         groupSegments, groupMotion)
 }
 
@@ -2354,6 +2371,29 @@ internal fun mainSleepGroup(blocks: List<SleepSession>, habitualMidsleepSec: Lon
         habitualMidsleepSec,
     ) ?: return emptyList()
     return idx.map { blocks[it] }.sortedBy { it.effectiveStartTs }
+}
+
+/** Longest a leading block can be and still be treated as a spurious pre-sleep awake stub (lying in bed
+ *  before sleep). Generous (a few hours) because the reporter's stub ran 21:41 → 00:27 — ~2h45m of pre-sleep
+ *  awake — so a tight cap missed it (#736). The real guard against swallowing a genuine first sleep fragment
+ *  is [PRE_ONSET_STUB_ASLEEP_MAX_MIN]: a stub must be essentially SLEEPLESS. Mirrors iOS
+ *  SleepView.preOnsetStubMaxMin. (#736) */
+private const val PRE_ONSET_STUB_MAX_MIN = 240.0
+/** Most asleep minutes a fragment can carry and still count as a (sleepless) pre-onset awake stub. A real
+ *  first sleep fragment of a biphasic night carries far more. Mirrors iOS SleepView.preOnsetStubAsleepMaxMin.
+ *  (#736) */
+private const val PRE_ONSET_STUB_ASLEEP_MAX_MIN = 3.0
+
+/** A fragment is a spurious pre-onset awake stub when it is within the lie-in cap (<= [PRE_ONSET_STUB_MAX_MIN])
+ *  and carries essentially no sleep (asleep minutes <= [PRE_ONSET_STUB_ASLEEP_MAX_MIN]). Used only to skip such
+ *  a stub when it leads the main-night group, so the hero's hypnogram and minutes start at the displayed
+ *  bedtime (the main block's onset) rather than before it. Mirrors iOS SleepView.isPreOnsetAwakeStub. (#736) */
+internal fun isPreOnsetAwakeStub(frag: SleepSession): Boolean {
+    val spanMin = (frag.endTs - frag.effectiveStartTs) / 60.0
+    if (spanMin > PRE_ONSET_STUB_MAX_MIN) return false
+    val stages = parseSessionStages(frag.stagesJSON)
+    val asleepMin = stages?.let { it.light + it.deep + it.rem } ?: 0.0
+    return asleepMin <= PRE_ONSET_STUB_ASLEEP_MAX_MIN
 }
 
 /** SUM the per-stage minutes across a bridged main-night group, so the hero's stage breakdown reflects the
@@ -2776,11 +2816,15 @@ private fun clockLabel(latest: DailyMetric, session: SleepSession?): String {
 }
 
 /** "Wed 4 Jun · 22:50–06:48" — the night-nav header's date · onset–wake line. (#160) */
-private fun sessionClockLabel(session: SleepSession): String {
+private fun sessionClockLabel(session: SleepSession): String =
+    clockLabelFor(session.effectiveStartTs, session.endTs) // EFFECTIVE onset so an edited bedtime shows (PR #395)
+
+/** Same date · onset–wake line from explicit unix-second bounds (the #736 group-aligned bedtime). */
+private fun clockLabelFor(onsetTs: Long, wakeTs: Long): String {
     val timeFmt = SimpleDateFormat("HH:mm", Locale.US)
     val dateFmt = SimpleDateFormat("EEE d MMM", Locale.US)
-    val onset = Date(session.effectiveStartTs * 1000L) // EFFECTIVE onset so an edited bedtime shows (PR #395)
-    val wake = Date(session.endTs * 1000L)
+    val onset = Date(onsetTs * 1000L)
+    val wake = Date(wakeTs * 1000L)
     return "${dateFmt.format(onset)} · ${timeFmt.format(onset)}–${timeFmt.format(wake)}"
 }
 

@@ -27,10 +27,14 @@ import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.VolumeOff
+import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -48,9 +52,18 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import android.content.Context
+import android.media.AudioAttributes
+import android.media.AudioFormat
+import android.media.AudioManager
+import android.media.AudioTrack
+import kotlin.math.PI
+import kotlin.math.sin
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.noop.analytics.BreathPacer
 import com.noop.analytics.Hrv
@@ -131,6 +144,16 @@ fun BreatheScreen(viewModel: AppViewModel) {
 
     var pace by remember { mutableStateOf(Pace.Coherence) }
     var running by remember { mutableStateOf(false) }
+
+    // Opt-in audio pacer — a soft tone at each phase change (a brighter note on the inhale, a lower one
+    // on the exhale). Default OFF (manual-first). The tone player honours the ringer mode, so a phone on
+    // silent/vibrate stays quiet — the Android twin of the iOS ambient session that obeys the silent
+    // switch. SharedPreferences isn't reactive: read once, mirror writes into this state.
+    var audioCues by remember {
+        mutableStateOf(NoopPrefs.of(context).getBoolean(KEY_BREATHE_AUDIO_CUES, false))
+    }
+    val tonePlayer = remember { BreathTonePlayer(context) }
+    DisposableEffect(Unit) { onDispose { tonePlayer.release() } }
     var phase by remember { mutableStateOf(Phase.Inhale) }
     var sessionSeconds by remember { mutableIntStateOf(0) }
     var breathCount by remember { mutableIntStateOf(0) }
@@ -220,10 +243,12 @@ fun BreatheScreen(viewModel: AppViewModel) {
             // Inhale: cue, then hold for the inhale duration.
             phase = Phase.Inhale
             viewModel.buzz(loops = 1)
+            if (audioCues) tonePlayer.play(BreathTone.Inhale)
             delay((pace.inhale(lockedBpm) * 1000).toLong())
             // Exhale: cue, then hold for the exhale duration.
             phase = Phase.Exhale
             viewModel.buzz(loops = 2)
+            if (audioCues) tonePlayer.play(BreathTone.Exhale)
             delay((pace.exhale(lockedBpm) * 1000).toLong())
             breathCount += 1
         }
@@ -328,7 +353,7 @@ fun BreatheScreen(viewModel: AppViewModel) {
                         domain = DomainTheme.Rest,
                         starCount = 56,
                     )
-                    BreathingOrb(progress = orbProgress, bpm = bpm, modifier = Modifier.height(280.dp))
+                    BreathingOrb(progress = orbProgress, bpm = bpm, running = running, modifier = Modifier.height(280.dp))
                 }
 
                 Text(
@@ -349,6 +374,15 @@ fun BreatheScreen(viewModel: AppViewModel) {
                     selection = pace,
                     label = { it.label },
                     onSelect = { pace = it },
+                )
+
+                // Opt-in audio pacer toggle — soft tone on each phase, honours the ringer mode.
+                AudioCueToggle(
+                    checked = audioCues,
+                    onChange = {
+                        audioCues = it
+                        NoopPrefs.of(context).edit().putBoolean(KEY_BREATHE_AUDIO_CUES, it).apply()
+                    },
                 )
             }
         }
@@ -474,7 +508,7 @@ fun BreatheScreen(viewModel: AppViewModel) {
 // MARK: - Breathing orb
 
 @Composable
-private fun BreathingOrb(progress: Float, bpm: Int?, modifier: Modifier = Modifier) {
+private fun BreathingOrb(progress: Float, bpm: Int?, running: Boolean = false, modifier: Modifier = Modifier) {
     val minScale = 0.42f
     val scale = minScale + (1f - minScale) * progress
     Box(
@@ -531,6 +565,50 @@ private fun BreathingOrb(progress: Float, bpm: Int?, modifier: Modifier = Modifi
                 Text("BPM", style = NoopType.footnote.copy(letterSpacing = 0.8.sp), color = Palette.textTertiary)
             }
         }
+        // Travelling guide ring — a brighter 2px stroke that rides the breath out toward the outer track
+        // and back (the sactyr suggestion: the middle ring grows to meet the outer ring on the inhale,
+        // then shrinks toward the core on the exhale). It scales with the same eased progress as the orb,
+        // so under reduced animations it simply parks at its current radius rather than pulsing.
+        Box(
+            modifier = Modifier
+                .fillMaxWidth(scale)
+                .aspectRatio(1f)
+                .clip(CircleShape)
+                .border(2.dp, Palette.restBright.copy(alpha = if (running) 0.65f else 0.35f), CircleShape),
+        )
+    }
+}
+
+// MARK: - Audio cue toggle
+
+@Composable
+private fun AudioCueToggle(checked: Boolean, onChange: (Boolean) -> Unit) {
+    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Icon(
+            if (checked) Icons.Filled.VolumeUp else Icons.Filled.VolumeOff,
+            contentDescription = null,
+            tint = if (checked) Palette.restBright else Palette.textTertiary,
+            modifier = Modifier.size(16.dp).padding(end = 10.dp),
+        )
+        Column(modifier = Modifier.weight(1f)) {
+            Text("Audio cues", style = NoopType.footnote, color = Palette.textSecondary)
+            Text(
+                "Soft tone on each phase · honours silent mode",
+                style = NoopType.caption, color = Palette.textTertiary, maxLines = 1,
+            )
+        }
+        Switch(
+            checked = checked,
+            onCheckedChange = onChange,
+            colors = SwitchDefaults.colors(
+                checkedThumbColor = Palette.surfaceBase,
+                checkedTrackColor = Palette.accent,
+                uncheckedThumbColor = Palette.textSecondary,
+                uncheckedTrackColor = Palette.surfaceInset,
+                uncheckedBorderColor = Palette.hairline,
+            ),
+            modifier = Modifier.semantics { contentDescription = "Audio cues" },
+        )
     }
 }
 
@@ -1191,3 +1269,113 @@ private fun ProgressBar(frac: Float) {
 
 private fun formatDay(epochMs: Long): String =
     SimpleDateFormat("d MMM", Locale.getDefault()).format(Date(epochMs))
+
+// ════════════════════════════════════════════════════════════════════════════
+// Audio pacer (opt-in soft phase tones)
+// ════════════════════════════════════════════════════════════════════════════
+
+/** SharedPreferences key for the opt-in audio pacer toggle (mirrors macOS `@AppStorage("breathe.audioCues")`). */
+private const val KEY_BREATHE_AUDIO_CUES = "breathe.audioCues"
+
+enum class BreathTone(val frequencyHz: Double) {
+    Inhale(440.0),   // A4, brighter for "in"
+    Exhale(330.0),   // E4, lower for "out"
+}
+
+/**
+ * The Android twin of [BreathTonePlayer] (iOS) — a tiny on-device tone player for the opt-in audio pacer.
+ * It synthesises a short, soft sine "ding" per phase (a higher note on the inhale, a lower one on the
+ * exhale) into an [AudioTrack].
+ *
+ * iOS uses an *ambient* audio session so the silent switch mutes it; Android has no silent switch, so the
+ * honest equivalent is to honour the **ringer mode** — when the phone is on silent or vibrate we simply
+ * don't play, the same "quiet means quiet" promise. The track is tagged as a sonification assistance cue
+ * (not media), so it ducks politely and won't hijack the music stream. Buffers are generated once and
+ * reused; [release] frees the track when the screen goes away or the pacer is switched off.
+ */
+class BreathTonePlayer(context: Context) {
+
+    private val appContext = context.applicationContext
+    private val audioManager = appContext.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+
+    private val sampleRate = 44_100
+    private val toneSeconds = 0.45
+    private val tracks = HashMap<BreathTone, AudioTrack?>()
+
+    /** Play the phase tone, unless the phone is on silent/vibrate (the "honours silent mode" promise). */
+    fun play(tone: BreathTone) {
+        val am = audioManager ?: return
+        if (am.ringerMode != AudioManager.RINGER_MODE_NORMAL) return
+        val track = tracks.getOrPut(tone) { buildTrack(tone) } ?: return
+        try {
+            // Restart from the top each phase so a fresh tone fires even if the last one is still tailing.
+            track.pause()
+            track.flush()
+            writeTone(track, tone)
+            track.play()
+        } catch (_: IllegalStateException) {
+            // Audio is a nicety, never load-bearing — if the track is in a bad state we just stay silent.
+        }
+    }
+
+    /** Release the underlying tracks. Idempotent. */
+    fun release() {
+        tracks.values.forEach { runCatching { it?.release() } }
+        tracks.clear()
+    }
+
+    private fun buildTrack(tone: BreathTone): AudioTrack? {
+        val samples = sampleData(tone)
+        val sizeBytes = samples.size * 2  // 16-bit PCM
+        return try {
+            val track = AudioTrack.Builder()
+                .setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_ASSISTANCE_SONIFICATION)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                        .build(),
+                )
+                .setAudioFormat(
+                    AudioFormat.Builder()
+                        .setSampleRate(sampleRate)
+                        .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                        .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                        .build(),
+                )
+                .setBufferSizeInBytes(maxOf(sizeBytes, 1))
+                .setTransferMode(AudioTrack.MODE_STREAM)
+                .build()
+            writeTone(track, tone)
+            track
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun writeTone(track: AudioTrack, tone: BreathTone) {
+        val samples = sampleData(tone)
+        track.write(samples, 0, samples.size)
+    }
+
+    /**
+     * Build a single soft sine tone with a short attack and a longer release envelope, so it fades in and
+     * out rather than clicking. Cached per tone so we synthesise it once.
+     */
+    private val cache = HashMap<BreathTone, ShortArray>()
+    private fun sampleData(tone: BreathTone): ShortArray = cache.getOrPut(tone) {
+        val total = (toneSeconds * sampleRate).toInt()
+        val attack = (0.02 * sampleRate).toInt()
+        val release = (0.18 * sampleRate).toInt()
+        val peak = 0.28  // kept quiet — a gentle cue, not a beep
+        ShortArray(total) { i ->
+            val t = i.toDouble() / sampleRate
+            val s = sin(2.0 * PI * tone.frequencyHz * t)
+            val env = when {
+                i < attack -> i.toDouble() / maxOf(attack, 1)
+                i > total - release -> (total - i).toDouble() / maxOf(release, 1)
+                else -> 1.0
+            }
+            (s * env * peak * Short.MAX_VALUE).toInt().toShort()
+        }
+    }
+}

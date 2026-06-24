@@ -38,13 +38,22 @@ class BackfillerSessionTallyTest {
 
     // Silent when nothing persisted, so a console-only / caught-up session doesn't claim a false success.
     @Test fun sessionSummaryNullWhenNoRows() {
-        assertNull(Backfiller.sessionSummaryLine(0, 0, 0))
+        assertNull(Backfiller.sessionSummaryLine(0, 0, 0, 0))
     }
 
     @Test fun sessionSummaryFormat() {
         assertEquals(
-            "Backfill: session persisted 240 rows (180 with motion) across 3 night(s).",
-            Backfiller.sessionSummaryLine(240, 180, 3),
+            "Backfill: session persisted 240 rows (180 with motion, 12 skin-temp) across 3 night(s).",
+            Backfiller.sessionSummaryLine(240, 180, 12, 3),
+        )
+    }
+
+    // #727: a strap banking HR/RR-only records (no DSP sleep block) persists rows but ZERO skin-temp,
+    // so the line surfaces that 0 and "skin temp never appears" reports are self-diagnosing from the log.
+    @Test fun sessionSummaryShowsZeroSkinTemp() {
+        assertEquals(
+            "Backfill: session persisted 872 rows (172 with motion, 0 skin-temp) across 1 night(s).",
+            Backfiller.sessionSummaryLine(872, 172, 0, 1),
         )
     }
 }

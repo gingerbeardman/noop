@@ -1,5 +1,6 @@
 import SwiftUI
 import StrandDesign
+import StrandAnalytics
 import WhoopStore
 import Foundation
 
@@ -47,6 +48,19 @@ struct TrendsView: View {
     // #436 — shareable offline trends report (PDF over a date range). The sheet owns its
     // own range picker; this just presents it with the loaded history.
     @State private var showingReport = false
+
+    /// Rest's per-day series, keyed by "yyyy-MM-dd". Rest is the sleep_performance COMPOSITE (the same
+    /// number the Today Rest score + the Sleep Rest-detail plot, #614 follow-up) — NOT raw efficiency,
+    /// which read differently under the same "Rest" label and made the Trends Rest graph disagree with
+    /// the Today Rest score (#732). sleep_performance is a metricSeries, not a DailyMetric field, so load
+    /// it once (mirroring TodayView's restScore source) and key by day for `resolve` below.
+    @State private var sleepPerfByDay: [String: Double] = [:]
+
+    // #710 — browse previous weeks in the Week-in-review digest. 0 = the week containing today; each step
+    // back is one Mon–Sun week earlier. Clamped so it never runs past the earliest day we hold (see
+    // `weekAnchorDay` / `stepWeek`). The Trends RANGE control below is independent of this — it scopes the
+    // long-form charts; this only moves the weekly digest at the top.
+    @State private var weekOffset = 0
 
     // Effort display scale (#268) — routes the Effort small-multiple's numbers + unit. Display-only.
     @AppStorage(UnitPrefs.effortScaleKey) private var effortScaleRaw = EffortScale.hundred.rawValue
@@ -215,14 +229,15 @@ struct TrendsView: View {
                 let hrv = resolve { $0.avgHrv }
                 let rhr = resolve { $0.restingHr.map(Double.init) }
                 let strain = resolve { $0.strain }
-                // Rest = sleep efficiency over the window, on the same 0–100 score scale as Charge,
-                // so the trio reads as one pip language (efficiency is a 0–1 fraction → ×100).
-                let rest = resolve { $0.efficiency.map { $0 * 100 } }
+                // Rest = the sleep_performance composite — the same number the Today Rest score shows
+                // (#732); see sleepPerfByDay. resolve() still does the windowing/widening.
+                let rest = resolve { sleepPerfByDay[$0.day] }
                 VStack(alignment: .leading, spacing: NoopMetrics.sectionSpacing) {
                     // The main card list ripples in once on appear (Reduce-Motion safe).
                     Group {
-                        // Week-in-review digest (#208) — self-hides when this week has no data.
-                        WeeklyDigestCard()
+                        // Week-in-review digest (#208) with prev/next week browsing (#710) — self-hides
+                        // only when NO week in history has data. Past weeks render in the same format.
+                        weeklyDigestNav
                             .staggeredAppear(index: 0)
                         // The Charge / Effort / Rest trio, presented in NOOP's pip language.
                         weekInReview(charge: recovery, effort: strain, rest: rest)
@@ -245,13 +260,129 @@ struct TrendsView: View {
         .sheet(isPresented: $showingReport) {
             TrendsReportSheet(days: repo.days)
         }
+        // #732 — load the resolved sleep_performance series so Rest plots the SAME composite the Today
+        // Rest score uses (not raw efficiency). Mirrors TodayView's restScore read. Keyed on the day
+        // count so a newly-banked/-scored night refreshes Rest reactively, like the other metrics that
+        // read `repo.days` directly (and like the Android LaunchedEffect(days) twin).
+        .task(id: repo.days.count) {
+            let s = await repo.exploreSeries(key: "sleep_performance", source: "my-whoop")
+            sleepPerfByDay = Dictionary(s.map { ($0.day, $0.value) }, uniquingKeysWith: { _, last in last })
+        }
+    }
+
+    // MARK: Week-in-review digest with prev/next week browsing (#710)
+
+    /// The earliest "yyyy-MM-dd" we hold (history is oldest → newest), used to clamp how far back the
+    /// week stepper can go.
+    private var earliestDay: String? { repo.days.first?.day }
+
+    /// The most negative `weekOffset` allowed: the number of whole weeks between the earliest day's week
+    /// and this week. Beyond that there's no data to digest, so the back chevron disables. 0 when history
+    /// is empty or unparseable (so we stay on this week).
+    private var minWeekOffset: Int {
+        guard
+            let earliest = earliestDay,
+            let earliestMon = WeeklyDigestEngine.mondayOfWeek(containing: earliest),
+            let thisMon = WeeklyDigestEngine.mondayOfWeek(containing: Repository.localDayKey(Date()))
+        else { return 0 }
+        // Walk weeks back from this Monday until we pass the earliest week. Bounded by history length.
+        var off = 0
+        var mon = thisMon
+        while mon > earliestMon && off > -520 {           // hard cap ~10 years so a bad date can't spin
+            mon = WeeklyDigestEngine.addDays(mon, -7)
+            off -= 1
+        }
+        return off
+    }
+
+    /// The anchor day (any day in the target week) for the current `weekOffset`: today shifted back by
+    /// `weekOffset` whole weeks. The engine snaps it to that week's Monday.
+    private var weekAnchorDay: String {
+        WeeklyDigestEngine.addDays(Repository.localDayKey(Date()), weekOffset * 7)
+    }
+
+    /// Move the digest one week earlier (-1) or later (+1), clamped to [minWeekOffset, 0] — never into a
+    /// future week, never past the earliest week we hold.
+    private func stepWeek(_ delta: Int) {
+        let next = weekOffset + delta
+        weekOffset = max(minWeekOffset, min(0, next))
+    }
+
+    /// The week-in-review digest for the selected week, with prev/next chevrons in its header. The digest
+    /// for `weekAnchorDay` is built straight from the shared `WeeklyDigestSource` (the same builder the
+    /// standalone WeeklyDigestCard uses) so past weeks render in the identical format. The whole block
+    /// self-hides only when there's no data in ANY week (an all-empty history), matching the old card.
+    @ViewBuilder
+    private var weeklyDigestNav: some View {
+        let digest = WeeklyDigestSource.digest(from: repo.days, anchorDay: weekAnchorDay)
+        // Only hide the navigation entirely when the WHOLE history is empty — an empty PAST week still
+        // shows the header + chevrons so the user can step to a week that does hold data.
+        if repo.days.isEmpty {
+            EmptyView()
+        } else {
+            VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
+                weekNavBar
+                if digest.isEmpty {
+                    // This particular week had no readings — keep the chevrons above so the user can move on.
+                    DataPendingNote(
+                        title: "No readings this week",
+                        message: "Step to another week with the arrows above to see its review.")
+                } else {
+                    WeeklyDigestContent(digest: digest, compact: true)
+                }
+            }
+        }
+    }
+
+    /// Prev/next week stepper. Back is clamped at the earliest week we hold; forward is clamped at this
+    /// week (no future weeks). Mirrors the FullDayChartView day stepper's flat accent chevrons (#597).
+    private var weekNavBar: some View {
+        let atOldest = weekOffset <= minWeekOffset
+        let atNewest = weekOffset >= 0
+        return HStack(spacing: NoopMetrics.cardInnerSpacing) {
+            Button { stepWeek(-1) } label: {
+                Image(systemName: "chevron.left").font(StrandFont.headline.weight(.semibold))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(atOldest ? StrandPalette.textTertiary : StrandPalette.accent)
+            .disabled(atOldest)
+            .accessibilityLabel("Previous week")
+
+            Spacer()
+            VStack(spacing: 2) {
+                Text(weekOffset == 0 ? "This week" : weekOffsetLabel)
+                    .font(StrandFont.headline)
+                    .foregroundStyle(StrandPalette.textPrimary)
+                Text("Week in review")
+                    .strandOverline()
+            }
+            Spacer()
+
+            Button { stepWeek(1) } label: {
+                Image(systemName: "chevron.right").font(StrandFont.headline.weight(.semibold))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(atNewest ? StrandPalette.textTertiary : StrandPalette.accent)
+            .disabled(atNewest)
+            .accessibilityLabel("Next week")
+        }
+        .padding(.horizontal, NoopMetrics.space1)
+        .accessibilityElement(children: .contain)
+    }
+
+    /// "Last week" for -1, else the count of weeks back ("3 weeks ago") for the stepper's centre label.
+    private var weekOffsetLabel: String {
+        let n = -weekOffset
+        if n == 1 { return "Last week" }
+        return "\(n) weeks ago"
     }
 
     // MARK: Week in Review — the Charge / Effort / Rest trio in pip language
 
     /// The three daily scores as NOOP pip rows over the resolved window: Charge (recovery, 0–100),
-    /// Effort (strain, shown on the WHOOP 0–21 scale per the unit toggle) and Rest (sleep efficiency,
-    /// 0–100). Each value ticks up via `CountUpText`; the segmented `PipBar` cascades on appear. Self-
+    /// Effort (strain, shown on the WHOOP 0–21 scale per the unit toggle) and Rest (sleep_performance
+    /// composite, 0–100 — the same metric the Today Rest score shows, #732). Each value ticks up via
+    /// `CountUpText`; the segmented `PipBar` cascades on appear. Self-
     /// hides when none of the three carry a window mean, so an empty history shows nothing here.
     @ViewBuilder
     private func weekInReview(charge: ResolvedMetric, effort: ResolvedMetric, rest: ResolvedMetric) -> some View {

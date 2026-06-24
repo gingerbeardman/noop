@@ -30,6 +30,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -68,6 +69,17 @@ fun LiveWorkoutScreen(vm: AppViewModel, onClose: () -> Unit) {
     DisposableEffect(Unit) {
         vm.requestRealtimeHr()
         onDispose { vm.releaseRealtimeHr() }
+    }
+
+    // Keep the screen awake while recording (#703). Opt-in, default off; the toggle lives in Settings.
+    // Read the same pref key the iOS @AppStorage uses ("workoutKeepScreenOn") and flag the view's window
+    // only while this screen is up, clearing it on the way out so normal screen-timeout resumes. Mirrors
+    // iOS calling ScreenIdle.keepAwake(true) on appear and false on disappear.
+    val view = LocalView.current
+    DisposableEffect(Unit) {
+        val on = NoopPrefs.of(context).getBoolean("workoutKeepScreenOn", false)
+        if (on) view.keepScreenOn = true
+        onDispose { view.keepScreenOn = false }
     }
 
     val w = activeWorkout

@@ -179,6 +179,48 @@ enum HeaderNorm {
         "zone_fc_3_pct": "hr_zone_3_pct",
         "zone_fc_4_pct": "hr_zone_4_pct",
         "zone_fc_5_pct": "hr_zone_5_pct",
+        // — Brazilian Portuguese (ciclos_fisiológicos / sonos / treinos / entradas_diário), issue #692.
+        //   Full header set across cycles, sleeps, workouts and journal, from a real pt-BR export. Note
+        //   "FC máx." folds to the same key as the French "FC max." alias above, and a Swift dictionary
+        //   literal traps on a duplicate key, so it is deliberately NOT repeated here. —
+        "hora_de_inicio_do_ciclo": "cycle_start_time",
+        "hora_de_fim_do_ciclo": "cycle_end_time",
+        "fuso_horario_do_ciclo": "cycle_timezone",
+        "pontuacao_de_recuperacao_pct": "recovery_score_pct",
+        "frequencia_cardiaca_em_repouso_bpm": "resting_heart_rate_bpm",
+        "variabilidade_da_frequencia_cardiaca_ms": "heart_rate_variability_ms",
+        "temp_da_pele_celsius": "skin_temp_celsius",
+        "pct_de_oxigenio_no_sangue": "blood_oxygen_pct",   // "% de oxigênio no sangue" → leading % becomes pct_…
+        "esforco_diario": "day_strain",
+        "energia_queimada_cal": "energy_burned_cal",
+        "fc_media_bpm": "average_hr_bpm",
+        "inicio_do_sono": "sleep_onset",
+        "inicio_da_vigilia": "wake_onset",
+        "desempenho_do_sono_pct": "sleep_performance_pct",
+        "frequencia_respiratoria_rpm": "respiratory_rate_rpm",
+        "duracao_do_sono_min": "asleep_duration_min",
+        "duracao_na_cama_min": "in_bed_duration_min",
+        "duracao_do_sono_leve_min": "light_sleep_duration_min",
+        "duracao_profundo_sono_min": "deep_sws_duration_min",   // "Duração profundo (Sono) (min)"
+        "duracao_rem_min": "rem_duration_min",
+        "duracao_de_vigilia_min": "awake_duration_min",
+        "necessidade_de_sono_min": "sleep_need_min",
+        "debito_de_sono_min": "sleep_debt_min",
+        "eficacia_do_sono_pct": "sleep_efficiency_pct",
+        "consistencia_do_sono_pct": "sleep_consistency_pct",
+        "sesta": "nap",
+        "hora_de_inicio_do_treino": "workout_start_time",
+        "hora_de_fim_do_treino": "workout_end_time",
+        "nome_da_atividade": "activity_name",
+        "esforco_da_atividade": "activity_strain",
+        "zona_1_de_fc_pct": "hr_zone_1_pct",
+        "zona_2_de_fc_pct": "hr_zone_2_pct",
+        "zona_3_de_fc_pct": "hr_zone_3_pct",
+        "zona_4_de_fc_pct": "hr_zone_4_pct",
+        "zona_5_de_fc_pct": "hr_zone_5_pct",
+        "texto_de_pergunta": "question_text",
+        "respondeu_sim": "answered_yes_no",
+        "notas": "notes",
     ]
 }
 

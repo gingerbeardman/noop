@@ -29,6 +29,11 @@ struct LiveWorkoutView: View {
     @AppStorage(UnitPrefs.effortScaleKey) private var effortScaleRaw = EffortScale.hundred.rawValue
     private var effortScale: EffortScale { UnitPrefs.resolveEffortScale(effortScaleRaw) }
 
+    /// Keep the screen awake while recording (#703). Opt-in, default off; the toggle lives in Settings.
+    /// Read here so we can hold the idle timer off only while this in-exercise screen is up and release it
+    /// the moment it leaves, which is exactly the bounded usage Apple asks for. iOS-only (no-op on Mac).
+    @AppStorage("workoutKeepScreenOn") private var keepScreenOn = false
+
     private var zoneSet: HRZoneSet { HRZones.zones(maxHR: Double(model.profile.hrMax)) }
     private var zone: Int { model.bpm.map { zoneSet.zoneNumber(forBPM: Double($0)) } ?? 0 }
 
@@ -71,8 +76,17 @@ struct LiveWorkoutView: View {
         // session. Ref-counted in AppModel, so when this sheet sits over an already-armed Live tab the
         // two balance and neither disarms the other (mirrors Android LiveWorkoutScreen's DisposableEffect
         // requestRealtimeHr/releaseRealtimeHr). Balanced: one start on appear, one stop on disappear.
-        .onAppear { model.startRealtimeHR() }
-        .onDisappear { model.stopRealtimeHR() }
+        .onAppear {
+            model.startRealtimeHR()
+            // Hold the display awake for the session only if the user opted in (#703).
+            if keepScreenOn { ScreenIdle.keepAwake(true) }
+        }
+        .onDisappear {
+            model.stopRealtimeHR()
+            // Always release on the way out so the system idle timer resumes. Even if the toggle was
+            // flipped off mid-workout, this clears any hold we placed.
+            ScreenIdle.keepAwake(false)
+        }
     }
 
     private var header: some View {

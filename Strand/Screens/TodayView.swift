@@ -22,6 +22,15 @@ import Foundation
 // Sparse series (weight) fall back to ALL history so a tile never shows an empty
 // state when data exists. Only locked StrandDesign components are used.
 
+/// Process-lifetime guard for the #605 dashboard auto-land. Lives outside the view so it survives a view
+/// re-mount: a TabView/module switch tears Today's `@State` down and rebuilds it, and with the old `@State`
+/// flag the one-shot reset to `false` and re-snapped the dashboard back onto the strap's start day every
+/// time the user came back (#739). Static = one value per LAUNCH: the auto-land fires at most once per app
+/// run, then the user navigates freely; a genuine relaunch is the only thing that re-arms it.
+private enum TodayAutoLand {
+    static var didLandThisLaunch = false
+}
+
 struct TodayView: View {
     @EnvironmentObject var repo: Repository
     // PERF (scroll stutter): TodayView deliberately does NOT observe `LiveState` directly. A connected
@@ -132,10 +141,6 @@ struct TodayView: View {
     // trend and Rest score) resolves to the selected day instead of always showing today. Mirrors the
     // Android TodayScreen.selectedDayOffset. Loads re-run when this changes (see .task(id:)).
     @State private var selectedDayOffset = 0
-    // #605: one-shot guard so the dashboard auto-lands on the most recent day WITH data the first time it
-    // opens to an empty today (fresh install, or a strap mid-backfill whose newest banked day is older than
-    // today). After the single auto-land the user can chevron freely without it snapping forward again.
-    @State private var didAutoLandLatest = false
     // iOS top-bar state: the date-jump popover and the profile/settings sheet.
     @State private var showDayPicker = false
     @State private var showSettings = false
@@ -181,6 +186,17 @@ struct TodayView: View {
     // or the ✕, so it never shows again. @AppStorage matches the file's existing prefs style (#103).
     @AppStorage(Self.guideCardSeenKey) private var scoringGuideCardSeen = false
     static let guideCardSeenKey = "scoringGuideCardSeen"
+
+    /// #739: only auto-land (#605) when the newest banked day is within this many days of today. Beyond it
+    /// the data is stale enough that snapping the dashboard there on launch is more surprising than just
+    /// showing an empty today, so we leave the user on today.
+    static let autoLandMaxDaysBack = 14
+
+    /// Dashboard-card placeholder for a baseline-relative metric (Stress) still seeding its window — an
+    /// honest "building your baseline" state rather than a bare dash (#706/#684). Rendered dimmed.
+    /// Localized: it shows in the card value slot, and the dimming check compares against this same
+    /// constant, so localizing both sides keeps the placeholder/real-value distinction intact.
+    static let calibratingPlaceholder = String(localized: "Calibrating")
 
     // H6 — the steps-calibration sheet, opened from the Steps tile when it's showing an ESTIMATE (a WHOOP
     // 4.0 user, whose strap doesn't transmit steps). Presents the SAME StepsCalibrationSheet Settings uses,
@@ -1332,7 +1348,11 @@ struct TodayView: View {
             // DEBUG promo harness: pin the Stress card (0–3) to the active frame's value. No-op otherwise.
             if let f = DemoDayHarness.active { return "\(f.stress0to3)" }
             #endif
-            return stressToday.map { "\(Int($0.rounded()))" } ?? "—"
+            // #706/#684: Stress is baseline-relative — until the strap has banked enough worn nights to seed
+            // the 30-day RHR/HRV baseline StressView reads, there's no number to show. A bare "—" read like a
+            // broken card; show the honest calibrating state instead, matching StressView's empty/calibrating
+            // copy and the owner's reply on #706.
+            return stressToday.map { "\(Int($0.rounded()))" } ?? Self.calibratingPlaceholder
         case .fitnessAge:
             return withUnit(fitnessAgeToday.map { "\(Int($0.rounded()))" } ?? "—")
         case .vitality:
@@ -1371,7 +1391,11 @@ struct TodayView: View {
                         .lineLimit(1)
                 }
                 Spacer(minLength: 8)
-                Text(value).font(StrandFont.rounded(18, weight: .semibold)).foregroundStyle(StrandPalette.textPrimary)
+                // A real number reads white; a placeholder (— / Calibrating) reads dimmed so it doesn't
+                // masquerade as a value.
+                let isPlaceholder = (value == "—" || value == Self.calibratingPlaceholder)
+                Text(value).font(StrandFont.rounded(18, weight: .semibold))
+                    .foregroundStyle(isPlaceholder ? StrandPalette.textTertiary : StrandPalette.textPrimary)
                 Image(systemName: "chevron.right").font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(StrandPalette.textTertiary)
             }
@@ -1524,13 +1548,15 @@ struct TodayView: View {
     /// One README "metric row": a metric-hue line icon, a secondary label, and a right-aligned bold
     /// value with a small unit. Rows are divided by a hairline. Shared by the Today vitals card.
     @ViewBuilder
-    private func metricRow(icon: String, label: String, value: String, unit: String, tint: Color) -> some View {
+    private func metricRow(icon: String, label: LocalizedStringKey, value: String, unit: String, tint: Color) -> some View {
         HStack(spacing: 12) {
             Image(systemName: icon)
                 .font(.system(size: 15, weight: .semibold))
                 .foregroundStyle(tint)
                 .frame(width: 22)
                 .accessibilityHidden(true)
+            // LocalizedStringKey so the vitals labels read from the catalog; `.textCase` uppercases the
+            // translated word in the current locale rather than baking an English "HRV"/"RESTING HR" in.
             Text(label)
                 .font(StrandFont.footnote.weight(.semibold))
                 .textCase(.uppercase)
@@ -1673,6 +1699,30 @@ struct TodayView: View {
         .frame(height: 150)
     }
 
+    /// The localized natural-case display word for a score domain (Charge / Effort / Rest / Stress). The
+    /// hero label uppercases this via `.textCase(.uppercase)`, so the catalog only needs the title-case key.
+    /// `domain.rawValue` stays the stable styling/lookup id; this is purely the user-facing word. Mirror in
+    /// Kotlin (the Android hero already reads its label from a localized resource, not the enum name).
+    private static func domainLabel(_ domain: DomainTheme) -> LocalizedStringKey {
+        switch domain {
+        case .charge: return "Charge"
+        case .effort: return "Effort"
+        case .rest:   return "Rest"
+        case .stress: return "Stress"
+        }
+    }
+
+    /// The VoiceOver label for a hero ring's "how this score is calculated" button, with the domain word
+    /// interpolated from a localized literal (so the spoken sentence is translated, not half-English).
+    private static func domainGuideAccessibilityLabel(_ domain: DomainTheme) -> LocalizedStringKey {
+        switch domain {
+        case .charge: return "How Charge is calculated"
+        case .effort: return "How Effort is calculated"
+        case .rest:   return "How Rest is calculated"
+        case .stress: return "How Stress is calculated"
+        }
+    }
+
     /// One hero ring column: the ring centred, with a tappable UPPERCASE domain label + chevron
     /// beneath it (the WHOOP affordance) that opens the matching scoring-guide section. The ring is
     /// intrinsically diameter×diameter, so the column just centres it and stretches to an equal share
@@ -1686,7 +1736,11 @@ struct TodayView: View {
             ring()
             Button { guideSection = section } label: {
                 HStack(spacing: 3) {
-                    Text(domain.rawValue.uppercased())
+                    // The CHARGE/EFFORT/REST hero label is localized: the catalog key is the natural-case
+                    // domain word (Charge/Effort/Rest) and `.textCase(.uppercase)` does the uppercasing in
+                    // the current locale, so a de/es/ru build shows the translated word, not the English id.
+                    Text(Self.domainLabel(domain))
+                        .textCase(.uppercase)
                         .font(StrandFont.overline)
                         .tracking(StrandFont.overlineTracking)
                     Image(systemName: "chevron.right")
@@ -1697,7 +1751,7 @@ struct TodayView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("How \(domain.rawValue.capitalized) is calculated")
+            .accessibilityLabel(Self.domainGuideAccessibilityLabel(domain))
             // Component 4 — the real per-day source under the ring (only when this score has a value for
             // the day AND we resolved its winner; a calibrating / empty ring shows no provenance badge).
             if let key = provenanceKey, ringHasValue(key), let label = provenanceLabel(key) {
@@ -2050,7 +2104,7 @@ struct TodayView: View {
                 // Component 2: never a bare blank — when there's no number, no calibration count and
                 // nothing to carry, the caption states the honest "Needs the strap" rather than nothing.
                 caption: d?.recovery.map { StrandPalette.recoveryState($0).capitalized }
-                    ?? recoveryCalibration.map { _ in "Calibrating" }
+                    ?? recoveryCalibration.map { _ in String(localized: "Calibrating") }
                     ?? carried.map { $0.caption }
                     ?? Self.needsStrapCaption,
                 accent: d?.recovery.map { StrandPalette.recoveryColor($0) }
@@ -2470,18 +2524,29 @@ struct TodayView: View {
         hrPoints = await repo.hrBuckets(from: windowStart, to: windowEnd, bucketSeconds: 300)
             .map { TrendPoint(date: Date(timeIntervalSince1970: TimeInterval($0.ts)), value: $0.bpm) }
 
-        // #605: if today itself has no HR yet, land the dashboard on the most recent day that DOES have
-        // data rather than presenting an empty graph (the top fresh-strap complaint). One-shot — changing
-        // selectedDayOffset re-runs this load for the landed day via .task(id:); the guard stops it
-        // re-evaluating, so the user can chevron back to today freely. Mirrors the Deep Timeline (#597).
-        if !didAutoLandLatest, selectedDayOffset == 0, hrPoints.isEmpty,
+        // #605/#739: the first time the app opens to a today with NOTHING banked, land the dashboard on the
+        // most recent day that DOES have data instead of an empty graph (the fresh-strap / mid-backfill
+        // complaint). Two guards keep this honest after #739:
+        //   - The trigger is "today has NO DailyMetric row at all", NOT merely "no HR points". A
+        //     metadata-only strap (recovery/sleep but no streamed HR) DID bank a row for today, so the old
+        //     hrPoints.isEmpty test snapped it back onto the start day even though today had data. Only an
+        //     empty today should auto-land.
+        //   - The latest banked day must be RECENT (within the auto-land window). If a user opens the app
+        //     after a long break their newest data could be weeks old; jumping the dashboard there on launch
+        //     is more confusing than an empty today, so we leave it on today in that case.
+        // The guard is process-lifetime (TodayAutoLand), so a module switch that re-mounts the view can't
+        // reset it and re-snap (#739). One-shot per launch; the user then chevrons freely.
+        // `repo.today` is the canonical resolved today row (the same one `displayDay` shows, including the
+        // #304 local-vs-logical carve-out). Non-nil ⇒ today has banked data ⇒ never auto-land.
+        let todayHasData = repo.today != nil
+        if !TodayAutoLand.didLandThisLaunch, selectedDayOffset == 0, !todayHasData,
            let latest = await repo.latestDataDayStart() {
-            didAutoLandLatest = true
+            TodayAutoLand.didLandThisLaunch = true
             let cal = Calendar.current
             let todayStart = cal.startOfDay(for: Repository.logicalDay(Date()))
             let latestStart = cal.startOfDay(for: latest)
             let back = cal.dateComponents([.day], from: latestStart, to: todayStart).day ?? 0
-            if back > 0 { selectedDayOffset = back; return }
+            if back > 0, back <= Self.autoLandMaxDaysBack { selectedDayOffset = back; return }
         }
 
         // In-progress Effort for TODAY (#402): score today's strain over the SAME window the HR curve
@@ -2697,8 +2762,9 @@ struct TodayView: View {
 
     /// The Component-2 "needs the strap" tile caption — the honest no-data state word a Charge/Rest tile
     /// shows instead of a bare blank when there's no value, no calibration count and nothing to carry.
-    /// Matches `MetricTileState.needsStrap.title` verbatim so the tile and the explained note say the same words.
-    static let needsStrapCaption = "Needs the strap"
+    /// Matches `MetricTileState.needsStrap.title` verbatim so the tile and the explained note say the same
+    /// words — both resolve from the SAME catalog key, so they stay in lockstep in every locale.
+    static let needsStrapCaption = String(localized: "Needs the strap")
 
     /// H10 — the honest empty-state caption for a recovery-vital tile (HRV / Resting HR / SpO₂ / Respiratory)
     /// when TODAY has no value yet and there's nothing to carry over. Those vitals are measured overnight, so
@@ -2707,7 +2773,7 @@ struct TodayView: View {
     /// user can't act on now). Pure copy/gate so it can be unit-tested without a live view. Mirror in Kotlin.
     static func emptyVitalCaption(unit: String, isToday: Bool) -> String? {
         guard isToday else { return nil }
-        return "After tonight's sleep"
+        return String(localized: "After tonight's sleep")
     }
 
     /// Pure copy/gate behind `buildingHint` — extracted so it can be unit-tested without a live view.
@@ -2716,8 +2782,8 @@ struct TodayView: View {
     static func buildingHintCopy(_ metric: KeyMetric, isToday: Bool) -> String? {
         guard isToday else { return nil }
         switch metric {
-        case .rest:   return "Building, wear it tonight"
-        case .effort: return "Building, moves as you do"
+        case .rest:   return String(localized: "Building, wear it tonight")
+        case .effort: return String(localized: "Building, moves as you do")
         default:      return nil
         }
     }
@@ -2905,6 +2971,20 @@ private struct StrapBatteryRow: View {
         }
     }
 
+    /// #713: "~X left" runtime from `live.batteryEstimate`. Under 48 hours we show hours so a nearly-flat
+    /// strap reads honestly ("~6h left"); at two days or more we round to days ("~9 days left"). nil (no
+    /// banked discharge yet, or charging) hides it, so the badge only ever shows an estimate we trust.
+    private var estimateText: String? {
+        guard live.charging != true, let est = live.batteryEstimate else { return nil }
+        let hours = est.hoursRemaining
+        guard hours.isFinite, hours > 0 else { return nil }
+        if hours < 48 {
+            return "~\(Int(hours.rounded()))h left"
+        }
+        let days = Int((hours / 24).rounded())
+        return "~\(days) day\(days == 1 ? "" : "s") left"
+    }
+
     var body: some View {
         if live.connected, let pct = live.batteryPct {
             Divider().overlay(StrandPalette.hairline)
@@ -2918,9 +2998,18 @@ private struct StrapBatteryRow: View {
                     Text("\(Int(pct.rounded()))%")
                         .font(StrandFont.captionNumber)
                         .foregroundStyle(StrandPalette.textSecondary)
+                    // The runtime estimate sits beside the %, dimmer, only when we have a trusted one.
+                    if let estimateText {
+                        Text("·")
+                            .font(StrandFont.captionNumber)
+                            .foregroundStyle(StrandPalette.textTertiary)
+                        Text(estimateText)
+                            .font(StrandFont.captionNumber)
+                            .foregroundStyle(StrandPalette.textTertiary)
+                    }
                 }
                 .accessibilityElement(children: .ignore)
-                .accessibilityLabel("Strap battery \(Int(pct.rounded())) percent\(live.charging == true ? ", charging" : "")")
+                .accessibilityLabel("Strap battery \(Int(pct.rounded())) percent\(live.charging == true ? ", charging" : "")\(estimateText.map { ", \($0)" } ?? "")")
             }
         }
     }

@@ -489,7 +489,7 @@ private struct RecoveryContributorsSection: View {
                 VStack(alignment: .leading, spacing: NoopMetrics.space4) {
                     ForEach(Array(contributors.enumerated()), id: \.offset) { idx, c in
                         ContributorBar(label: c.label, strength: ready ? c.strength : nil,
-                                       word: ready ? c.word : "Calibrating",
+                                       word: ready ? c.word : String(localized: "Calibrating"),
                                        detail: c.detail, tint: c.tint)
                             .staggeredAppear(index: idx)
                     }

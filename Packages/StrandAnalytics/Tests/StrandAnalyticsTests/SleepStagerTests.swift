@@ -490,6 +490,82 @@ final class SleepStagerTests: XCTestCase {
         XCTAssertNotEqual(withLowRmssd, "deep", "a measurable-but-low RMSSD epoch must still clear the high-tone bar")
     }
 
+    // #705: a still, low-HR sleep epoch with INFLATED HR-variance (hrVar ≥ the high bar) but a normal HR
+    // (below hrHigh) and a touch of movement used to be flipped to WAKE on a WHOOP 5/MG night, because the
+    // PPG-derived HR makes per-epoch hrVar noisy and the WAKE rule trusted hrvarHigh as cardiac activation.
+    // On a sparse/PPG night the WAKE rule must vet the cardiac half by HR only (down-weight hrVar), so the
+    // epoch stays sleep. A dense 4.0 night (cardiacSparse:false) keeps the original hrHigh||hrvarHigh signal.
+    private func ppgWakeEpoch() -> SleepStager.EpochFeatures {
+        // moveFrac just over the wake bar (0.15), HR normal (60, below hrHi=90, above hrLo=55 so not deep),
+        // hrVar inflated above the high bar, missing R-R (sparse → resp also NaN → regular).
+        SleepStager.EpochFeatures(index: 0, midTs: 0, count: 0, moveFrac: 0.16,
+                                  ckSleep: true, hr: 60, hrVar: 200, rmssd: .nan, sdnn: 0,
+                                  respRate: 14, rrv: .nan, clock: 0.5)
+    }
+
+    func testSparseCardiacDoesNotPromoteStillSleepToWakeOnHrVarAlone_705() {
+        // Dense path: hrvarHigh alone clears the WAKE cardiac bar → this epoch reads wake (old behaviour).
+        let dense = SleepStager.classifyOne(ppgWakeEpoch(),
+            hrLo: 55, hrHi: 90, rmssdHi: 50, hrvarHi: 100, rrvHi: 1, rrvLo: 0.5,
+            cardiacSparse: false)
+        XCTAssertEqual(dense, "wake", "dense 4.0 night keeps the full hrHigh||hrvarHigh wake signal")
+
+        // Sparse/PPG path: the noisy hrVar is down-weighted for the wake promotion → no longer wake.
+        let sparse = SleepStager.classifyOne(ppgWakeEpoch(),
+            hrLo: 55, hrHi: 90, rmssdHi: 50, hrvarHi: 100, rrvHi: 1, rrvLo: 0.5,
+            cardiacSparse: true)
+        XCTAssertNotEqual(sparse, "wake", "a sparse/PPG night must not flip still low-HR sleep to wake on hrVar alone")
+    }
+
+    func testCardiacSparseFlagFiresOnMostlyMissingRmssd_705() {
+        // A night where >= half the sleep epochs carry no finite RMSSD is PPG-derived / sparse-cardiac.
+        let withRR = SleepStager.EpochFeatures(index: 0, midTs: 0, count: 0, moveFrac: 0, ckSleep: true,
+            hr: 55, hrVar: 0, rmssd: 40, sdnn: 0, respRate: 14, rrv: .nan, clock: 0.5)
+        let noRR = SleepStager.EpochFeatures(index: 0, midTs: 0, count: 0, moveFrac: 0, ckSleep: true,
+            hr: 55, hrVar: 0, rmssd: .nan, sdnn: 0, respRate: 14, rrv: .nan, clock: 0.5)
+        XCTAssertTrue(SleepStager.isCardiacSparse([noRR, noRR, noRR, withRR]),
+            "3/4 epochs missing R-R is sparse-cardiac")
+        XCTAssertFalse(SleepStager.isCardiacSparse([withRR, withRR, withRR, noRR]),
+            "1/4 epochs missing R-R is a dense (4.0-style) night")
+        XCTAssertFalse(SleepStager.isCardiacSparse([]), "empty session is not sparse")
+    }
+
+    // #705 (golden): a still PPG night used to score mostly WAKE because the noisy PPG-derived hrVar
+    // tripped the high hrVar bar on still, low-HR sleep epochs and the WAKE rule treated that as cardiac
+    // activation. We classify a batch of such epochs with FIXED session bars (deterministic — same shape
+    // as the #127 tests) under both rules. On the dense rule the over-wake reproduces; with the
+    // sparse-cardiac gate the WAKE share collapses while the elevated-HR awakenings still read wake.
+    func testStillPpgNightNoLongerScoresMostlyWake_705() {
+        // Fixed bars: hrLo=48, hrHi=70, hrvarHi=120. A still, low-HR (52) epoch with a touch of motion
+        // (0.16) and inflated hrVar (200) — no finite R-R/resp. 9/10 such, 1/10 a real HR-elevated wake.
+        func epoch(hr: Double, hrVar: Double) -> SleepStager.EpochFeatures {
+            SleepStager.EpochFeatures(index: 0, midTs: 0, count: 0, moveFrac: 0.16,
+                                      ckSleep: true, hr: hr, hrVar: hrVar, rmssd: .nan, sdnn: 0,
+                                      respRate: 14, rrv: .nan, clock: 0.5)
+        }
+        let night: [SleepStager.EpochFeatures] = (0..<40).map { i in
+            (i % 10 == 9) ? epoch(hr: 80, hrVar: 200)   // genuine elevated-HR awakening
+                          : epoch(hr: 52, hrVar: 200)   // still, low-HR sleep with noisy PPG hrVar
+        }
+        let bars = (hrLo: 48.0, hrHi: 70.0, rmssdHi: 50.0, hrvarHi: 120.0, rrvHi: 1.0, rrvLo: 0.5)
+
+        func wakeShare(cardiacSparse: Bool) -> Double {
+            let labels = night.map {
+                SleepStager.classifyOne($0, hrLo: bars.hrLo, hrHi: bars.hrHi, rmssdHi: bars.rmssdHi,
+                                        hrvarHi: bars.hrvarHi, rrvHi: bars.rrvHi, rrvLo: bars.rrvLo,
+                                        cardiacSparse: cardiacSparse)
+            }
+            return Double(labels.filter { $0 == "wake" }.count) / Double(labels.count)
+        }
+
+        // Dense rule reproduces the bug: almost the whole night reads wake (hrvarHigh alone promotes).
+        XCTAssertGreaterThan(wakeShare(cardiacSparse: false), 0.80,
+            "dense rule still over-reports wake on a noisy-hrVar night (reproduces #705)")
+        // Sparse-cardiac gate: only the real HR-elevated awakenings stay wake (~10%).
+        XCTAssertLessThan(wakeShare(cardiacSparse: true), 0.40,
+            "a still PPG night must not be classified as mostly wake (was 40%+ before #705)")
+    }
+
     // #127 (follow-up): the "deep is front-loaded" re-imposition zeroed deep entirely on nights whose
     // whole deep block lands after the first third (clock > 1/3). It must only re-impose late "deep" to
     // light when there's deep in the first third to anchor it; otherwise keep the best estimate.

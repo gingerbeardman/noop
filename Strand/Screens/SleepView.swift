@@ -1346,11 +1346,77 @@ struct SleepView: View {
     /// each fragment's real timeline end-to-end, and `sourceBlocks` keeps every block so the naps card and
     /// the daily Main/Nap/Total summary can read them. A single-block day is byte-identical to the prior
     /// behaviour. Returns nil if the group decodes to no usable stages. (#170, #318, #518, #555, #561)
+
+    /// The night's DISPLAYED onset (bedtime), aligned to the SAME fragment the pencil edit targets so the
+    /// shown "Asleep" time and the editor agree (#736). The bug: a night sometimes records a brief, all-awake
+    /// pre-sleep stub (e.g. lying in bed scrolling at 21:41) as its own block. The gap-bridge folds it into
+    /// the main-night group, so it became `group.first` and drove the shown bedtime, while the pencil edited
+    /// the MAIN block (`mainNightSession`, which scores by sleep span/timing and skips the all-awake stub) —
+    /// the two diverged and editing couldn't move the displayed bedtime. Fix: skip a leading spurious stub
+    /// when deriving the shown onset so it lands on the first fragment with real sleep, which IS the edit
+    /// target. A stub is spurious only when it's BRIEF and essentially sleepless AND a later fragment carries
+    /// the real sleep; otherwise the earliest effective onset stands (single-block and normal biphasic nights
+    /// are byte-identical). Returns a real fragment's `effectiveStartTs`, never a synthetic value.
+    private func nightOnsetTs(_ group: [CachedSleepSession]) -> Int {
+        // group is ascending by effective onset; first is the earliest fragment.
+        guard let first = group.first else { return 0 }
+        // Walk past any leading spurious pre-onset awake stubs to the first real-sleep fragment.
+        for frag in group {
+            if !isPreOnsetAwakeStub(frag) { return frag.effectiveStartTs }
+        }
+        // Whole group is stub-like (shouldn't reach the hero, mergeDay gates on stages.asleep > 0): keep the
+        // earliest onset rather than inventing one.
+        return first.effectiveStartTs
+    }
+
+    /// A fragment is a spurious pre-onset awake stub when it's within the lie-in cap (<= `preOnsetStubMaxMin`)
+    /// and carries essentially no sleep (asleep minutes <= `preOnsetStubAsleepMaxMin`). Used only to skip such
+    /// a stub when it leads the main-night group, so the displayed bedtime tracks where real sleep began. (#736)
+    private func isPreOnsetAwakeStub(_ frag: CachedSleepSession) -> Bool {
+        let spanMin = Double(frag.endTs - frag.effectiveStartTs) / 60.0
+        let asleepMin = decodeStages(frag.stagesJSON)?.asleep ?? 0
+        return SleepView.isPreOnsetAwakeStub(spanMin: spanMin, asleepMin: asleepMin)
+    }
+
+    /// Longest a leading block can be and still be treated as a spurious pre-sleep awake stub (lying in bed
+    /// before sleep). Generous (a few hours) because the reporter's stub ran 21:41 → 00:27 — ~2h45m of
+    /// pre-sleep awake — so a tight cap missed it (#736). The real guard against swallowing a genuine first
+    /// sleep fragment is `preOnsetStubAsleepMaxMin`: a stub must be essentially SLEEPLESS, which a real sleep
+    /// block never is. The cap only stops a pathological all-day awake block from being silently dropped.
+    static let preOnsetStubMaxMin: Double = 240
+    /// Most asleep minutes a fragment can carry and still count as a (sleepless) pre-onset awake stub. A real
+    /// first sleep fragment of a biphasic night carries far more, so it's never mistaken for a stub. (#736)
+    static let preOnsetStubAsleepMaxMin: Double = 3
+
+    /// Pure stub test on a fragment's span + asleep minutes, so the rule is unit-testable without decoding
+    /// JSON or building a view. BRIEF and essentially sleepless = a spurious pre-onset awake stub. (#736)
+    static func isPreOnsetAwakeStub(spanMin: Double, asleepMin: Double) -> Bool {
+        spanMin <= preOnsetStubMaxMin && asleepMin <= preOnsetStubAsleepMaxMin
+    }
+
+    /// The index into an ascending-by-onset group whose fragment supplies the DISPLAYED bedtime: the first
+    /// fragment that is NOT a spurious leading pre-onset awake stub, falling back to 0 when every fragment is
+    /// stub-like. Pure mirror of `nightOnsetTs`'s walk, driven by per-fragment (spanMin, asleepMin) so a
+    /// golden test can pin the #736 behaviour without view internals. (#736)
+    static func nightOnsetIndex(spansMin: [Double], asleepsMin: [Double]) -> Int {
+        for i in spansMin.indices {
+            let asleep = i < asleepsMin.count ? asleepsMin[i] : 0
+            if !isPreOnsetAwakeStub(spanMin: spansMin[i], asleepMin: asleep) { return i }
+        }
+        return 0
+    }
+
     private func mergeDay(_ sessions: [CachedSleepSession]) -> Night? {
-        let group = SleepView.mainNightGroup(sessions, habitualMidsleepSec: habitualMidsleepSec)
-        // Earliest fragment's EFFECTIVE onset (corrected bedtime when present) to the latest wake. (#318)
-        guard let first = group.first, let last = group.last else { return nil }
-        let onset = first.effectiveStartTs, wake = last.endTs
+        let fullGroup = SleepView.mainNightGroup(sessions, habitualMidsleepSec: habitualMidsleepSec)
+        // The displayed bedtime is the night's MAIN onset, aligned to the same fragment the pencil edits.
+        // The latest wake closes the span. (#318, #736)
+        guard let last = fullGroup.last else { return nil }
+        let onset = nightOnsetTs(fullGroup), wake = last.endTs
+        // Aggregate (stages, hypnogram, motion) from the displayed onset fragment onward so the chart and
+        // the totals start where the bedtime label does — a spurious leading pre-sleep awake stub is dropped
+        // from the night's reconstruction (#736). It still rides in `sourceBlocks`/`mainGroupStarts`, so it's
+        // never lost and never mislabelled as a nap. Without a leading stub this is the whole group (unchanged).
+        let group = fullGroup.drop { $0.effectiveStartTs < onset }
         var stages = Stages(awake: 0, light: 0, deep: 0, rem: 0)
         var segs: [SleepInterval] = []
         // #407: lay the GROUP's per-epoch motion fragment-by-fragment in the SAME order the stage timeline

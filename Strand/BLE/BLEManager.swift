@@ -387,6 +387,12 @@ public final class BLEManager: NSObject, ObservableObject {
     /// Wall time the encrypted bond was established this connection, to measure how soon a drop follows
     /// the bond (the #617 bond-loop tell). nil until bonded; cleared on disconnect.
     private var bondedAt: Date?
+    /// Monotonic per-connection token, bumped on every didConnect. The #711 bond-loop stabilization check
+    /// captures it and clears the re-pair guide only if it is UNCHANGED when the check fires, i.e. the SAME
+    /// continuous connection survived. CoreBluetooth reuses the CBPeripheral object across reconnects, so a
+    /// `===` identity check would NOT tell a healthy session apart from a later loop cycle. Named distinctly
+    /// from Repository.swift's v7.0.3 refreshGen publish token so the two never get confused.
+    private var connectGeneration = 0
     /// #126 false-alarm guard: tracks CONSECUTIVE console-only completed syncs so the "clock has lost
     /// sync" banner only fires on sustained emptiness, not a single transient empty cycle on a healthy strap.
     private var emptySyncTracker = EmptySyncTracker()
@@ -671,6 +677,11 @@ public final class BLEManager: NSObject, ObservableObject {
     public func connect(model: WhoopModel = .persisted) {
         intentionalDisconnect = false
         selectedModel = model
+        // Battery "~X days left" fallback (#713): a 5/MG runs far longer than a 4.0, so point the estimator's
+        // rated-life fallback at the connected family. The Today badge reads state.batteryEstimate (which uses
+        // state.batteryRatedHours); without this it always assumed WHOOP 4.0 (108h).
+        state.batteryRatedHours = model.deviceFamily == .whoop5
+            ? BatteryEstimator.ratedLifeHoursWhoop5 : BatteryEstimator.ratedLifeHoursWhoop4
         // Frame the inbound stream for the chosen family (WHOOP 4.0 CRC8 vs WHOOP 5.0 CRC16/puffin)
         // and tell the router which decoder to use. Fresh per connection so no stale bytes carry over.
         reassembler = Reassembler(family: model.deviceFamily)
@@ -713,13 +724,16 @@ public final class BLEManager: NSObject, ObservableObject {
         if let p = existing.first(where: { isPreferredPeripheral($0) }) {
             log("Found existing \(model.displayName) connection \(p.identifier) — attaching")
             preparePeripheral(p)
-            if p.state == .connected {
-                state.connected = true
-                discoverPrimaryServices(on: p)
-                enableLiveNotifications(reason: "attached connection")
-            } else {
-                central.connect(p, options: nil)
-            }
+            // Attach OUR OWN session even when CoreBluetooth reports the strap .connected. On Apple
+            // platforms an LE link is shared system-wide, so a strap held by the WHOOP app, a prior NOOP
+            // session, or the OS itself reads .connected while NOOP has NO session of its own yet. The old
+            // .connected branch flipped state.connected = true and jumped straight to discovery + live
+            // notifications, which then silently delivered nothing: the UI claimed "connected" but no data
+            // ever flowed (#689). Routing through connect(_:) instead fires didConnect almost immediately
+            // for an already-system-connected peripheral, which runs the normal discover, bond and notify
+            // flow and only flips state.connected once OUR link is actually up, so we never falsely report
+            // "connected" either.
+            central.connect(p, options: nil)
             return
         }
         // Pinned to a specific strap that isn't already open → connect it DIRECTLY by identifier. A scan
@@ -742,6 +756,7 @@ public final class BLEManager: NSObject, ObservableObject {
         // (manual) reconnect attempts the full R10/R11 stream again rather than inheriting old suspicion.
         marginalRadio.reset()
         postBondLoop.reset()   // #617: a clean teardown clears the bond-loop streak so a manual reconnect starts fresh
+        state.reconnectGuide = nil   // #711: a user-initiated teardown resolves the re-pair guide (no longer looping)
         readoptingTo = nil   // #52: a clean teardown abandons any in-flight pin handoff
         standardHRFallback = false
         state.standardHRMode = nil
@@ -1255,7 +1270,7 @@ public final class BLEManager: NSObject, ObservableObject {
         // so a strap log couldn't tell a banking strap from a broken one. Emit the per-session persistence
         // tally whenever anything actually landed — the win-rate signal a log previously lacked.
         if let bf = backfiller,
-           let summary = Backfiller.sessionSummaryLine(rows: bf.sessionRowsPersisted, motion: bf.sessionMotionRows, nights: bf.sessionNights) {
+           let summary = Backfiller.sessionSummaryLine(rows: bf.sessionRowsPersisted, motion: bf.sessionMotionRows, skinTemp: bf.sessionSkinTempRows, nights: bf.sessionNights) {
             log(summary)
         }
         // #547 RE-POLLUTION: this session's ingest gate dropped bad-clock records, so the strap has a
@@ -2184,7 +2199,27 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
         // only — BLEManager stays decoupled from the store and the connect flow below is unchanged.
         connectedPeripheralUUID = peripheral.identifier.uuidString
         state.connected = true
-        state.reconnectGuide = nil    // a connect succeeded — the stale-bond guide (if shown) is resolved
+        // A connect succeeded → clear the stale-bond re-pair guide UNLESS we are in a known bond-loop
+        // (#617). In that loop the strap "connects" every ~3 s before timing out again, so clearing here
+        // wiped the guide on EVERY cycle: it flashed for ~1 s and vanished, so the user could never read it
+        // (#711). While tripped, keep the guide up and instead clear it once THIS connection proves healthy,
+        // i.e. it survives past the loop's quick-timeout window (below), or on a clean teardown
+        // (disconnect() resets the detector and clears the guide too).
+        connectGeneration &+= 1
+        if postBondLoop.tripped {
+            let gen = connectGeneration
+            DispatchQueue.main.asyncAfter(deadline: .now() + postBondLoop.quickTimeoutWindow + 1) { [weak self] in
+                // Clear only if the SAME continuous connection is still up. A reconnect (loop cycle) bumps
+                // connectGeneration, so a transient cycle-connect can't satisfy this even though the
+                // CBPeripheral object is reused. Without the generation, the timer could fire during a later
+                // cycle's brief connect and wrongly wipe the guide, back to flashing.
+                guard let self, self.state.connected, self.connectGeneration == gen else { return }
+                self.postBondLoop.reset()        // survived the window → the bond-loop is resolved
+                self.state.reconnectGuide = nil
+            }
+        } else {
+            state.reconnectGuide = nil
+        }
         lastDataAt = Date()
         log("Connected — discovering services")
         discoverPrimaryServices(on: peripheral)

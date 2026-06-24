@@ -1152,6 +1152,11 @@ class WhoopBleClient(
      *  looping silently. Reset on a user-initiated disconnect; the streak is otherwise broken naturally by
      *  any healthy (non-quick-timeout) disconnect. Twin of macOS BLEManager.postBondLoop. */
     private val postBondLoop = PostBondTimeoutLoopDetector()
+    /** Monotonic per-connection token, bumped on every connect. The #711 bond-loop stabilization check
+     *  captures it and clears the re-pair guide only if it is UNCHANGED when the check fires, i.e. the SAME
+     *  continuous connection survived (a reconnect/loop cycle bumps it, so the device address staying equal
+     *  across cycles can't fool it). Twin of macOS BLEManager.connectGeneration. */
+    @Volatile private var connectGeneration = 0
     /** Wall time (System.currentTimeMillis) the encrypted bond was established this connection, to
      *  measure how soon a drop follows the bond (the #617 bond-loop tell). null until bonded; cleared on
      *  disconnect after the detector reads it. Twin of macOS BLEManager.bondedAt. */
@@ -1425,7 +1430,8 @@ class WhoopBleClient(
         // A user-initiated teardown is a clean slate: clear the #617 bond-loop streak so the next (manual)
         // reconnect starts fresh rather than inheriting old suspicion. Twin of macOS disconnect().
         postBondLoop.reset()
-        _state.value = _state.value.copy(scanning = false, statusNote = null)
+        // #711: a user-initiated teardown resolves the re-pair guide (no longer looping).
+        _state.value = _state.value.copy(scanning = false, statusNote = null, reconnectGuide = null)
         // disconnect() can throw on a dead binder (radio off, #314). If it does, the OS won't deliver
         // onConnectionStateChange(DISCONNECTED), so tear down directly instead of crashing.
         try {
@@ -2397,7 +2403,32 @@ class WhoopBleClient(
                     // A successful connect clears the reconnect backoff — the next involuntary drop
                     // starts the 3,6,12…s schedule afresh (iOS didConnect: failedConnectAttempts=0, #48).
                     resetReconnectBackoff()
-                    _state.value = _state.value.copy(connected = true, advertisingName = g.device.name, scanning = false, statusNote = null, encryptedBond = false, reconnectGuide = null)
+                    // A connect succeeded → clear the stale-bond re-pair guide UNLESS we are in a known
+                    // bond-loop (#617). In that loop the strap "connects" every ~3 s before timing out
+                    // again, so clearing here wiped the guide on EVERY cycle: it flashed for ~1 s and
+                    // vanished, so the user could never read it (#711). While tripped, keep the guide and
+                    // clear it once THIS connection proves healthy (survives the loop's quick-timeout window,
+                    // below) or on a clean teardown. Twin of macOS BLEManager.didConnect.
+                    val keepGuide = postBondLoop.tripped
+                    _state.value = _state.value.copy(
+                        connected = true, advertisingName = g.device.name, scanning = false,
+                        statusNote = null, encryptedBond = false,
+                        reconnectGuide = if (keepGuide) _state.value.reconnectGuide else null,
+                    )
+                    connectGeneration += 1
+                    if (keepGuide) {
+                        val gen = connectGeneration
+                        handler.postDelayed({
+                            // Clear only if the SAME continuous connection is still up: a reconnect (loop
+                            // cycle) bumps connectGeneration, so a transient cycle-connect can't satisfy this
+                            // even though the device address is identical across cycles. Without it, the timer
+                            // could fire during a later cycle's brief connect and wrongly wipe the guide.
+                            if (_state.value.connected && connectGeneration == gen) {
+                                postBondLoop.reset()        // survived the window → the bond-loop is resolved
+                                _state.value = _state.value.copy(reconnectGuide = null)
+                            }
+                        }, postBondLoop.quickTimeoutWindowMs + 1_000L)
+                    }
                     // Multi-WHOOP: publish the connected strap's stable BLE address so SourceCoordinator can
                     // adopt it onto the active registry device's peripheralId on first connect. Additive twin
                     // of macOS BLEManager.connectedPeripheralUUID (set in didConnect). Decoupled from the
@@ -3909,7 +3940,8 @@ class WhoopBleClient(
         // tally whenever anything actually landed — the win-rate signal a log previously lacked. Mirrors
         // the Swift exitBackfilling.
         Backfiller.sessionSummaryLine(
-            backfiller.sessionRowsPersisted, backfiller.sessionMotionRows, backfiller.sessionNights,
+            backfiller.sessionRowsPersisted, backfiller.sessionMotionRows, backfiller.sessionSkinTempRows,
+            backfiller.sessionNights,
         )?.let { log(it) }
 
         // #547 RE-POLLUTION: this session's ingest gate dropped bad-clock records, so the strap has a

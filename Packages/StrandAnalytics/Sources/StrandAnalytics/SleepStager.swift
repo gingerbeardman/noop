@@ -243,6 +243,16 @@ public enum SleepStager {
     public static let stageWakeMoveFrac: Double = 0.15
     public static let stageStillMoveFrac: Double = 0.10
 
+    /// Fraction of sleep-period epochs that must carry a MISSING per-epoch RMSSD (sparse R-R) for the
+    /// session's cardiac signal to count as PPG-DERIVED / sparse-cardiac. On a WHOOP 5/MG the PPG-derived
+    /// HR feeds a noisier per-epoch HR-variance, which inflates `hrVar` on otherwise still, low-HR sleep
+    /// epochs and was tripping the Stage-2 WAKE rule (which keys on the `hrvarHigh` percentile) — so a
+    /// whole night over-reported WAKE. We already trust `!rmssd.isFinite` as a PPG/sparse tell for the
+    /// pro-deep RMSSD handling (#127/#129); at this share across the night it also down-weights the
+    /// HR-variance half of the WAKE rule. ~50% keeps a real worn 4.0 night (dense R-R) on the strict
+    /// path and only relaxes nights whose cardiac signal is genuinely sparse/derived. (#705)
+    public static let cardiacSparseEpochFrac: Double = 0.5
+
     public static let smoothEpochs: Int = 5
     public static let noREMAfterOnsetMin: Double = 15.0
     public static let deepFirstFraction: Double = 1.0 / 3.0
@@ -1387,15 +1397,29 @@ public enum SleepStager {
         let hrvarHi = percentile(sleepFeats.map { $0.hrVar }, stageHRVarHighPct)
         let rrvHi = percentile(sleepFeats.map { $0.rrv }, stageRRVHighPct)
         let rrvLo = percentile(sleepFeats.map { $0.rrv }, stageRRVLowPct)
+        let cardiacSparse = isCardiacSparse(sleepFeats)
 
         return features.map {
             classifyOne($0, hrLo: hrLo, hrHi: hrHi, rmssdHi: rmssdHi,
-                        hrvarHi: hrvarHi, rrvHi: rrvHi, rrvLo: rrvLo)
+                        hrvarHi: hrvarHi, rrvHi: rrvHi, rrvLo: rrvLo,
+                        cardiacSparse: cardiacSparse)
         }
     }
 
+    /// Session-level PPG-derived / sparse-cardiac tell: most sleep-period epochs carry NO finite
+    /// per-epoch RMSSD (sparse R-R). On those nights the HR is PPG-derived and its windowed variance
+    /// (`hrVar`) is noisier, so the percentile `hrvarHigh` bar fires on genuinely still, low-HR sleep —
+    /// which the WAKE rule must NOT treat as cardiac activation. Same `!rmssd.isFinite` signal already
+    /// trusted for the pro-deep RMSSD handling (#127/#129), aggregated across the night. (#705)
+    static func isCardiacSparse(_ sleepFeats: [EpochFeatures]) -> Bool {
+        if sleepFeats.isEmpty { return false }
+        let sparse = sleepFeats.reduce(0) { $0 + (($1.rmssd.isFinite) ? 0 : 1) }
+        return Double(sparse) >= cardiacSparseEpochFrac * Double(sleepFeats.count)
+    }
+
     static func classifyOne(_ f: EpochFeatures, hrLo: Double?, hrHi: Double?,
-                            rmssdHi: Double?, hrvarHi: Double?, rrvHi: Double?, rrvLo: Double?) -> String {
+                            rmssdHi: Double?, hrvarHi: Double?, rrvHi: Double?, rrvLo: Double?,
+                            cardiacSparse: Bool = false) -> String {
         let hasHR = f.hr.isFinite
         let hrLow = hasHR && hrLo != nil && f.hr <= hrLo!
         let hrHigh = hasHR && hrHi != nil && f.hr >= hrHi!
@@ -1411,6 +1435,13 @@ public enum SleepStager {
         let hrvarHigh = f.hrVar.isFinite && hrvarHi != nil && f.hrVar >= hrvarHi!
         let cardiacActivated = hrHigh || hrvarHigh
 
+        // WAKE-specific cardiac vetting. On a PPG-derived / sparse-cardiac night the per-epoch HR-variance
+        // is noisy, so `hrvarHigh` fires on still, low-HR sleep and used to flip those epochs to WAKE. When
+        // the session is sparse we DOWN-WEIGHT hrVar for the wake promotion and require a real elevated HR
+        // (`hrHigh`) — the down-weighting mirrors how sparse R-R is trusted for the pro-deep RMSSD handling.
+        // Dense 4.0 nights keep the full `hrHigh || hrvarHigh` signal, so their behaviour is unchanged. (#705)
+        let cardiacActivatedForWake = cardiacSparse ? hrHigh : cardiacActivated
+
         let rrvIrregular = f.rrv.isFinite && rrvHi != nil && f.rrv >= rrvHi!
         // Missing respiration (NaN RRV) treated as "regular" (pro-deep bias).
         let rrvRegular = (!f.rrv.isFinite) || (rrvLo != nil && f.rrv <= rrvLo!)
@@ -1418,8 +1449,10 @@ public enum SleepStager {
         let still = f.moveFrac <= stageStillMoveFrac
         let moving = f.moveFrac >= stageWakeMoveFrac
 
-        // WAKE: sustained motion + activated cardiac (or no HR to vet motion).
-        if moving && (cardiacActivated || !hasHR) { return "wake" }
+        // WAKE: sustained motion + activated cardiac (or no HR to vet motion). On a sparse/PPG night the
+        // cardiac half is vetted by HR only (see `cardiacActivatedForWake`), so noisy hrVar no longer
+        // over-promotes still sleep to wake. (#705)
+        if moving && (cardiacActivatedForWake || !hasHR) { return "wake" }
         // DEEP: still + low HR + regular respiration, with high parasympathetic tone when measurable.
         if still && parasympOK && hrLow && rrvRegular { return "deep" }
         // REM: still body + activated cardiac + irregular respiration.
@@ -1547,7 +1580,8 @@ public enum SleepStager {
     /// using the exact predicates and precedence of `classifyOne` so the diagnostic can never diverge
     /// from the real classifier. Read-only. (#688)
     static func remRejectReason(_ f: EpochFeatures, hrLo: Double?, hrHi: Double?,
-                                rmssdHi: Double?, hrvarHi: Double?, rrvHi: Double?, rrvLo: Double?) -> REMRejectReason {
+                                rmssdHi: Double?, hrvarHi: Double?, rrvHi: Double?, rrvLo: Double?,
+                                cardiacSparse: Bool = false) -> REMRejectReason {
         // Mirror classifyOne's derived predicates exactly.
         let hasHR = f.hr.isFinite
         let hrLow = hasHR && hrLo != nil && f.hr <= hrLo!
@@ -1555,6 +1589,7 @@ public enum SleepStager {
         let parasympOK = (!f.rmssd.isFinite) || (rmssdHi != nil && f.rmssd >= rmssdHi!)
         let hrvarHigh = f.hrVar.isFinite && hrvarHi != nil && f.hrVar >= hrvarHi!
         let cardiacActivated = hrHigh || hrvarHigh
+        let cardiacActivatedForWake = cardiacSparse ? hrHigh : cardiacActivated
         let rrvIrregular = f.rrv.isFinite && rrvHi != nil && f.rrv >= rrvHi!
         let rrvRegular = (!f.rrv.isFinite) || (rrvLo != nil && f.rrv <= rrvLo!)
         let still = f.moveFrac <= stageStillMoveFrac
@@ -1562,7 +1597,7 @@ public enum SleepStager {
 
         // classifyOne precedence: WAKE, then DEEP, then REM (then REM fallback), else LIGHT.
         // An epoch that wins WAKE or DEEP was never a REM candidate.
-        if moving && (cardiacActivated || !hasHR) { return .wonOtherStage }     // → wake
+        if moving && (cardiacActivatedForWake || !hasHR) { return .wonOtherStage }     // → wake
         if still && parasympOK && hrLow && rrvRegular { return .wonOtherStage } // → deep
         // From here the epoch did NOT win wake/deep; it is either REM or falls through to LIGHT.
         if still && cardiacActivated && rrvIrregular { return .remEligible }
@@ -1611,6 +1646,7 @@ public enum SleepStager {
         let hrvarHi = percentile(sleepFeats.map { $0.hrVar }, stageHRVarHighPct)
         let rrvHi = percentile(sleepFeats.map { $0.rrv }, stageRRVHighPct)
         let rrvLo = percentile(sleepFeats.map { $0.rrv }, stageRRVLowPct)
+        let cardiacSparse = isCardiacSparse(sleepFeats)
 
         // Classify + post-process exactly as stageSession does, so we explain the SAME hypnogram.
         let labels = classifyEpochs(feats)
@@ -1630,7 +1666,8 @@ public enum SleepStager {
             if f.rrv.isFinite { respChannelPresent = true }
             // Per-epoch REM reason at the raw classifier seam (pre-smoothing) — the funnel's mouth.
             switch remRejectReason(f, hrLo: hrLo, hrHi: hrHi, rmssdHi: rmssdHi,
-                                   hrvarHi: hrvarHi, rrvHi: rrvHi, rrvLo: rrvLo) {
+                                   hrvarHi: hrvarHi, rrvHi: rrvHi, rrvLo: rrvLo,
+                                   cardiacSparse: cardiacSparse) {
             case .remEligible:           remAtClassify += 1
             case .wonOtherStage:         wonOtherStage += 1
             case .notStill:              blockedNotStill += 1

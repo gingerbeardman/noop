@@ -47,6 +47,13 @@ object ExerciseTypes {
      */
     val EXTRA: List<Pair<String, Int>> = listOf(
         "Padel" to EX.EXERCISE_TYPE_OTHER_WORKOUT,
+        // #714 indoor treadmill walk. HC has a treadmill-RUN type but no treadmill-WALK type, so this
+        // rides on plain WALKING for writeback while keeping its own "Treadmill walk" label. Kept OUT of
+        // DISTANCE_TYPES so GPS defaults off (an indoor session has no route).
+        "Treadmill walk" to EX.EXERCISE_TYPE_WALKING,
+        // #714 bodybuilding. No dedicated HC type, so it rides on STRENGTH_TRAINING for writeback and
+        // keeps "Bodybuilding" on our own rows. No route → GPS off.
+        "Bodybuilding" to EX.EXERCISE_TYPE_STRENGTH_TRAINING,
     )
 
     /** Types where a route makes sense -> GPS defaults on. */

@@ -80,6 +80,12 @@ struct SettingsView: View {
     /// Nothing is ever created automatically. Mirrors the Android `NoopPrefs.KEY_AUTO_DETECT_WORKOUTS`.
     @AppStorage(PuffinExperiment.autoDetectWorkoutsKey) private var autoDetectWorkoutsEnabled = false
 
+    /// Opt-in "Keep screen on during a workout" (default OFF, #703). When ON, the live-workout view
+    /// holds the screen awake while a manual recording is running so you can glance at your live HR
+    /// without the device dimming. The live-workout view reads this same key. The string is shared
+    /// verbatim with the Android twin (SharedPreferences "workoutKeepScreenOn").
+    @AppStorage("workoutKeepScreenOn") private var workoutKeepScreenOn = false
+
     /// The strap model the user last picked (same key the scan pickers write). Gates the WHOOP 4.0-only
     /// rename control in the strap card — renaming uses the Harvard command set, which a 5/MG doesn't share.
     @AppStorage("selectedWhoopModel") private var selectedWhoopModelRaw = WhoopModel.whoop4.rawValue
@@ -908,6 +914,22 @@ struct SettingsView: View {
                     .font(StrandFont.caption)
                     .foregroundStyle(StrandPalette.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
+
+                Divider().overlay(StrandPalette.hairline)
+
+                Toggle(isOn: $workoutKeepScreenOn) {
+                    Text("Keep screen on during a workout")
+                        .font(StrandFont.subhead)
+                        .foregroundStyle(StrandPalette.textPrimary)
+                }
+                .toggleStyle(.switch)
+                .tint(StrandPalette.accent)
+                .accessibilityHint("Stops the screen dimming while a workout is recording")
+
+                Text("Holds the screen awake while you're recording a workout, so your live heart rate stays visible without the device dimming. Only applies during a recording — the screen sleeps normally the rest of the time. Leaving it on does use a bit more battery, and means your unlocked screen stays visible for the whole workout, so flip it off if that's a concern.")
+                    .font(StrandFont.caption)
+                    .foregroundStyle(StrandPalette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }
@@ -1709,7 +1731,33 @@ struct SettingsView: View {
                     }
                     .contentShape(Rectangle())
                 }
-                .accessibilityLabel("Project home and source code at noop dot fans")
+                .accessibilityLabel("Project home and source code on GitHub")
+
+                // Mirror — noop.fans carries every release alongside GitHub, so users have a
+                // fallback if GitHub is ever unreachable (#606). Same downloads, release for release.
+                Link(destination: URL(string: "https://noop.fans")!) {
+                    HStack(spacing: 10) {
+                        Image(systemName: "arrow.triangle.2.circlepath")
+                            .foregroundStyle(StrandPalette.accent)
+                            .accessibilityHidden(true)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("Mirror — noop.fans")
+                                .font(StrandFont.body)
+                                .foregroundStyle(StrandPalette.textPrimary)
+                            Text("Every release, mirrored. A fallback if GitHub is ever down.")
+                                .font(StrandFont.footnote)
+                                .foregroundStyle(StrandPalette.textTertiary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        Spacer()
+                        Image(systemName: "arrow.up.right")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(StrandPalette.textTertiary)
+                            .accessibilityHidden(true)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .accessibilityLabel("Mirror at noop dot fans, a fallback if GitHub is down")
 
                 Text("A standalone companion for your WHOOP. Everything stays on this device — your history, your live stream, your numbers. Nothing is uploaded. NOOP is an independent, experimental project, not the WHOOP app.")
                     .font(StrandFont.subhead)

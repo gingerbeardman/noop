@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import StrandAnalytics
 
 /// Observable snapshot of the live connection + biometric state, driven by FrameRouter
 /// (from decoded frames) and BLEManager (from CoreBluetooth callbacks).
@@ -42,6 +43,30 @@ public final class LiveState: ObservableObject {
     /// first event of a session; cleared on disconnect so a stale flag can't outlive the link.
     /// Flag ONLY — the battery % keeps its family-specific source (#77).
     @Published public var charging: Bool? = nil
+
+    // MARK: - Battery runtime estimate (#713)
+
+    /// Rolling buffer of `(unix-seconds, SoC%)` battery readings banked from the live link, the twin of
+    /// `rrRecent` for the battery series. `setBattery` appends each reading (with a small dedupe so a
+    /// repeated identical % at a near-identical time doesn't pad the buffer), and `batteryEstimate` fits
+    /// the recent discharge slope over it. Capped + bounded so it can't grow without limit; cleared on
+    /// disconnect so a stale estimate can't outlive the link.
+    @Published public private(set) var batterySamples: [(ts: Int, soc: Double)] = []
+    /// Cap on the SoC buffer. Battery events arrive only every ~8 minutes, so a few hundred readings
+    /// already spans a couple of days, plenty to fit a discharge slope against.
+    static let maxBatterySamples = 400
+
+    /// The strap's typical full-charge life in hours, chosen by generation, used as the cold-start
+    /// fallback before enough of the user's own discharge is banked. The today lane / coordinator sets
+    /// this from the connected `WhoopModel` (WHOOP 4.0 vs 5.0/MG); it defaults to the WHOOP 4.0 figure so
+    /// an estimate is sensible before the strap generation is known.
+    @Published public var batteryRatedHours: Double = BatteryEstimator.ratedLifeHoursWhoop4
+
+    /// "~X days left" runtime estimate for the connected strap, computed from the banked SoC samples and
+    /// `batteryRatedHours`. nil until there's at least one reading. The Today badge reads this.
+    public var batteryEstimate: BatteryEstimator.Estimate? {
+        BatteryEstimator.estimate(samples: batterySamples, ratedHours: batteryRatedHours)
+    }
     @Published public var lastFrameType: String? = nil
     @Published public var lastEvent: String? = nil
     /// The strap's BLE advertising name, read back from firmware via GET_ADVERTISING_NAME_HARVARD
@@ -220,7 +245,27 @@ public final class LiveState: ObservableObject {
     /// so both write sites (FrameRouter, BLEManager) drive the alert monitor identically.
     public func setBattery(_ pct: Double) {
         batteryPct = pct
+        bankBatterySample(pct)
         onBatteryUpdate?(pct)
+    }
+
+    /// Append a SoC reading to the rolling `batterySamples` buffer for the runtime estimate (#713). The
+    /// strap emits battery events every ~8 minutes, so we skip a reading that's the SAME % as the last one
+    /// within ten minutes (a duplicate event, not new discharge information) to keep the slope fit clean;
+    /// any change in %, or enough elapsed time, banks a fresh point. The oldest readings fall off once the
+    /// buffer is full. `now` is injectable so the estimate is unit-testable without a live clock.
+    func bankBatterySample(_ pct: Double, now: Int = Int(Date().timeIntervalSince1970)) {
+        if let last = batterySamples.last, last.soc == pct, now - last.ts < 600 { return }
+        batterySamples.append((ts: now, soc: pct))
+        if batterySamples.count > Self.maxBatterySamples {
+            batterySamples.removeFirst(batterySamples.count - Self.maxBatterySamples)
+        }
+    }
+
+    /// Drop the banked SoC buffer (called on disconnect) so a stale runtime estimate can't outlive the
+    /// link, the twin of the `charging = nil` clear on the same path.
+    public func clearBatterySamples() {
+        batterySamples.removeAll()
     }
 
     /// Single funnel for R-R intervals from EITHER source (the standard 0x2A37 profile in BLEManager,
@@ -245,6 +290,7 @@ public final class LiveState: ObservableObject {
         heartRate = nil
         rr.removeAll()
         rrRecent.removeAll()
+        clearBatterySamples()   // a stale runtime estimate must not outlive the link either (#713)
     }
 
     /// Cap on the in-app strap-log ring buffer. Raised from the old ~1h (200 lines) to retain a rolling

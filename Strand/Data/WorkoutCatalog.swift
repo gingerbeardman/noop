@@ -33,11 +33,15 @@ enum WorkoutCatalog {
         Sport(name: "Open-water swim", isDistanceSport: true),
         Sport(name: "Rowing", isDistanceSport: true),
         Sport(name: "Treadmill run", isDistanceSport: false),
+        // Indoor treadmill walk (#714). Distance off so GPS stays defaulted off, like Treadmill run.
+        Sport(name: "Treadmill walk", isDistanceSport: false),
         Sport(name: "Indoor cycle", isDistanceSport: false),
         Sport(name: "Pool swim", isDistanceSport: false),
         Sport(name: "Row machine", isDistanceSport: false),
         Sport(name: "Elliptical", isDistanceSport: false),
         Sport(name: "Strength", isDistanceSport: false),
+        // Bodybuilding (#714). A strength-style session with no route, so GPS off.
+        Sport(name: "Bodybuilding", isDistanceSport: false),
         Sport(name: "Weightlifting", isDistanceSport: false),
         Sport(name: "HIIT", isDistanceSport: false),
         Sport(name: "Yoga", isDistanceSport: false),

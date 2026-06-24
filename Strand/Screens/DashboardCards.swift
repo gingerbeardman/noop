@@ -33,40 +33,42 @@ enum DashboardCard: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
-    /// The card's display label (the UPPERCASE WHOOP metric-row label is derived from this).
+    /// The card's display label (the UPPERCASE WHOOP metric-row label is derived from this). Localized via
+    /// the String Catalog so the dashboard rows read in the user's language (the `.uppercased()` the row
+    /// applies then uppercases the LOCALIZED word, with the current locale's casing rules).
     var title: String {
         switch self {
-        case .hrv:         return "HRV"
-        case .restingHr:   return "Resting HR"
-        case .respiratory: return "Respiratory"
-        case .steps:       return "Steps"
-        case .stress:      return "Stress"
-        case .fitnessAge:  return "Fitness Age"
-        case .vitality:    return "Vitality"
-        case .bloodOxygen: return "Blood Oxygen"
-        case .skinTemp:    return "Skin Temp"
-        case .sleep:       return "Sleep"
-        case .calories:    return "Calories"
-        case .hydration:   return "Hydration"
+        case .hrv:         return String(localized: "HRV")
+        case .restingHr:   return String(localized: "Resting HR")
+        case .respiratory: return String(localized: "Respiratory")
+        case .steps:       return String(localized: "Steps")
+        case .stress:      return String(localized: "Stress")
+        case .fitnessAge:  return String(localized: "Fitness Age")
+        case .vitality:    return String(localized: "Vitality")
+        case .bloodOxygen: return String(localized: "Blood Oxygen")
+        case .skinTemp:    return String(localized: "Skin Temp")
+        case .sleep:       return String(localized: "Sleep")
+        case .calories:    return String(localized: "Calories")
+        case .hydration:   return String(localized: "Hydration")
         }
     }
 
     /// A short grey baseline/caption shown under the row's value (the WHOOP "30-day baseline" line).
-    /// Static descriptive text only — never invented data.
+    /// Static descriptive text only — never invented data. Localized via the String Catalog.
     var subtitle: String {
         switch self {
-        case .hrv:         return "Heart-rate variability"
-        case .restingHr:   return "Resting heart rate"
-        case .respiratory: return "Breaths per minute"
-        case .steps:       return "Today"
-        case .stress:      return "Autonomic load"
-        case .fitnessAge:  return "Updated weekly"
-        case .vitality:    return "Wellness score"
-        case .bloodOxygen: return "Blood oxygen"
-        case .skinTemp:    return "Skin temperature"
-        case .sleep:       return "Last night"
-        case .calories:    return "Active energy"
-        case .hydration:   return "Today's fluid"
+        case .hrv:         return String(localized: "Heart-rate variability")
+        case .restingHr:   return String(localized: "Resting heart rate")
+        case .respiratory: return String(localized: "Breaths per minute")
+        case .steps:       return String(localized: "Today")
+        case .stress:      return String(localized: "Autonomic load")
+        case .fitnessAge:  return String(localized: "Updated weekly")
+        case .vitality:    return String(localized: "Wellness score")
+        case .bloodOxygen: return String(localized: "Blood oxygen")
+        case .skinTemp:    return String(localized: "Skin temperature")
+        case .sleep:       return String(localized: "Last night")
+        case .calories:    return String(localized: "Active energy")
+        case .hydration:   return String(localized: "Today's fluid")
         }
     }
 

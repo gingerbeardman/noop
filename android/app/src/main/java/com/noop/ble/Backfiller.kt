@@ -149,6 +149,14 @@ class Backfiller(
         private set
     var sessionMotionRows = 0
         private set
+    /**
+     * #727: skin-temp samples banked this session. WHOOP 4.0 carries skin temp (and the raw SpO2 channel)
+     * ONLY in its full DSP sleep records; a strap banking HR/RR-only records reports 0 here even on a
+     * healthy-looking sync, so surfacing it makes "skin temp never appears" reports self-diagnosing. Mirrors
+     * the Swift Backfiller.
+     */
+    var sessionSkinTempRows = 0
+        private set
     private val sessionNightKeys = HashSet<Long>()
     val sessionNights: Int get() = sessionNightKeys.size
 
@@ -205,6 +213,7 @@ class Backfiller(
         isBackfilling = true
         sessionRowsPersisted = 0
         sessionMotionRows = 0
+        sessionSkinTempRows = 0
         sessionNightKeys.clear()
         loggedNoCursor = false
         loggedLayoutVersions.clear()
@@ -344,6 +353,7 @@ class Backfiller(
                 val (rows, motion, nights) = chunkTally(counts, decoded.gravity.map { it.ts } + decoded.hr.map { it.ts })
                 sessionRowsPersisted += rows
                 sessionMotionRows += motion
+                sessionSkinTempRows += counts.skinTemp
                 sessionNightKeys.addAll(nights)
             } catch (t: Throwable) {
                 return // do NOT advance/ack — chunk was never durably committed
@@ -410,9 +420,9 @@ class Backfiller(
          * when nothing persisted, so a console-only / caught-up session stays quiet and the existing
          * empty-banking diagnostics speak instead.
          */
-        fun sessionSummaryLine(rows: Int, motion: Int, nights: Int): String? =
+        fun sessionSummaryLine(rows: Int, motion: Int, skinTemp: Int, nights: Int): String? =
             if (rows <= 0) null
-            else "Backfill: session persisted $rows rows ($motion with motion) across $nights night(s)."
+            else "Backfill: session persisted $rows rows ($motion with motion, $skinTemp skin-temp) across $nights night(s)."
     }
 }
 
